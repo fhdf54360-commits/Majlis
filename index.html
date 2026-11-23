@@ -113,6 +113,9 @@ button.chip{cursor:pointer}
 .sh-o b{display:block;font-size:16px}.sh-o small{display:block;color:var(--mut);font-size:12.5px;font-weight:600}
 .sh-o:active{background:rgba(59,130,246,.2)}
 #imgpick,#vidpick{display:none}
+.room{display:flex;align-items:center;gap:10px;padding:10px;border-radius:16px;background:rgba(255,255,255,.05);border:1px solid var(--line);margin:8px 0}
+.room .rav{width:44px;height:44px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;background:hsl(var(--h) 55% 42%)}
+.room .ri{flex:1;min-width:0}.room .rn{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.room .rs{font-size:12.5px;color:var(--mut)}
 .grid.sm .tile{aspect-ratio:auto;padding:28px 6px 32px}
 .grid.sm .tile .tag{font-size:10px;padding:2px 5px}
 @media (max-width:640px){#top{flex-wrap:wrap;row-gap:8px}.namebox{max-width:none}#chips{margin:0;width:100%;justify-content:flex-start}#chips:empty{display:none}}
@@ -150,11 +153,11 @@ const TOPIC_ROOT = 'majlis-call-ar/v1/';
 const RTC_CFG = {iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
 /* جودة عرض الشاشة: تنزل وتطلع لحالها حسب النت (0 = أعلى جودة) */
 const LV = [
-  {w:1600,h:1000,q:.72,g:250},
-  {w:1280,h:800, q:.62,g:400},
-  {w:1024,h:640, q:.52,g:700},
-  {w:800, h:500, q:.45,g:1100},
-  {w:640, h:400, q:.40,g:1600},
+  {w:1280,h:800,q:.6, g:400},
+  {w:1024,h:640,q:.5, g:700},
+  {w:854, h:534,q:.45,g:1000},
+  {w:720, h:450,q:.4, g:1400},
+  {w:560, h:350,q:.36,g:2000},
 ];
 const LV_NAMES = ['عالية جدًا','عالية','متوسطة','منخفضة','منخفضة جدًا'];
 
@@ -391,11 +394,15 @@ function hostMq(topic,payload){
 /* معلومات الغرفة (عشان اللي يدخل بالكود أو الرابط يلقاها). ما فيه قائمة غرف عامة */
 function publishRoom(){
   if(!Net.isHost||!Net.mq)return;
-  Net.mq.publish(tp('/room'),JSON.stringify({code:Net.code,n:active().length,max:MAX_PEOPLE,ts:Date.now(),b:Net.idx,priv:!!H.priv}),true);
+  const info={code:Net.code,n:active().length,max:MAX_PEOPLE,ts:Date.now(),b:Net.idx,priv:!!H.priv};
+  Net.mq.publish(tp('/room'),JSON.stringify(info),true);
+  // قائمة الغرف العامة: الخاصة ما تنحط فيها أبد
+  const me=P(Net.myId);
+  Net.mq.publish(TOPIC_ROOT+'list/'+Net.code,H.priv?'':JSON.stringify(Object.assign({host:me?me.name:''},info)),true);
 }
 function closeRoom(){
   if(!Net.mq)return;
-  try{Net.mq.publish(tp('/room'),'',true)}catch(e){}
+  try{Net.mq.publish(tp('/room'),'',true);Net.mq.publish(TOPIC_ROOT+'list/'+Net.code,'',true)}catch(e){}
   Object.values(Net.peers).forEach(p=>{try{p.pc.close()}catch(e){}});Net.peers={};
 }
 function hostWatch(){
@@ -503,7 +510,7 @@ function hostFrameFull(from,fid,parts,m,q){
     viewers++;
     const wsb=Net.mq.ws?Net.mq.ws.bufferedAmount:0;
     if(wsb>500000)skipped++;
-    else if(now-H.lastMqFrame>=700){H.lastMqFrame=now;parts.forEach((a,i)=>Net.mq.publish(tp('/f'),frameMsg(from,fid,i,n,a,m,q)))}
+    else if(now-H.lastMqFrame>=1000){H.lastMqFrame=now;parts.forEach((a,i)=>Net.mq.publish(tp('/f'),frameMsg(from,fid,i,n,a,m,q)))}
   }
   // لو أغلب المشاهدين ما لحقوا: نطلب من اللي يعرض ينزّل الجودة
   if(viewers&&skipped*2>=viewers)H.skipRun++;else H.skipRun=0;
@@ -618,7 +625,7 @@ function leaveRoom(silent){
   history.replaceState(null,'',location.pathname+(URLP.get('broker')?'?broker='+encodeURIComponent(URLP.get('broker')):''));
   render();
 }
-function goHome(){Net.leaving=true;clearInterval(Net.helloI);if(Net.mq){Net.mq.end();Net.mq=null}Net.isHost=false;C.screen='home';C.joined=false;C.pending=null;render()}
+function goHome(){closeRoomsConns();Net.leaving=true;clearInterval(Net.helloI);if(Net.mq){Net.mq.end();Net.mq=null}Net.isHost=false;C.screen='home';C.joined=false;C.pending=null;render()}
 function roomLink(){
   let u=location.href.split('?')[0].split('#')[0]+'?room='+Net.code+'&b='+Net.idx+(Net.key?'&k='+Net.key:'');
   if(URLP.get('broker'))u+='&broker='+encodeURIComponent(URLP.get('broker'));
@@ -655,12 +662,55 @@ const CAP = {o:false};
 const CAPP = (async()=>{try{
   if(window.AudioEncoder&&window.AudioDecoder&&window.EncodedAudioChunk&&window.AudioData){
     const c={codec:'opus',sampleRate:OSR,numberOfChannels:1};
-    const e=await AudioEncoder.isConfigSupported(Object.assign({bitrate:24000},c)),d=await AudioDecoder.isConfigSupported(c);
+    const e=await AudioEncoder.isConfigSupported(Object.assign({bitrate:16000},c)),d=await AudioDecoder.isConfigSupported(c);
     CAP.o=!!(e&&e.supported&&d&&d.supported);
   }}catch(e){CAP.o=false}})();
 /* عزل الصوت (زر في الشريط تحت، طافي بالبداية): يشغّل كاتم الضوضاء في المتصفح (وعزل الصوت لو مدعوم)،
    ويضيّق الفلاتر، ويرفع حد السكوت عشان أصوات الخلفية ما تنرسل */
-const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.02]};
+const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.012]};
+/* كاتم ضوضاء خاص بالموقع (يشتغل مع عزل الصوت): يتعلّم صوت الخلفية الثابت (مكيف، مروحة، زحمة)
+   ويطرحه من الصوت بتحليل الترددات (FFT 512 بتداخل نص). يشتغل على أي جهاز حتى لو المتصفح ما يدعم العزل. */
+const DN = {rate:0,N:512,H:256,win:null,inb:new Float32Array(0),ola:null,noise:null,ps:null,g:null,re:null,im:null,cos:null,sin:null,rev:null};
+function dnInit(rate){
+  const N=DN.N;DN.rate=rate;DN.win=new Float32Array(N);for(let i=0;i<N;i++)DN.win[i]=Math.sin(Math.PI*(i+.5)/N);
+  DN.inb=new Float32Array(0);DN.ola=new Float32Array(DN.H);DN.noise=null;DN.ps=null;DN.g=new Float32Array(N/2+1).fill(1);
+  DN.re=new Float32Array(N);DN.im=new Float32Array(N);DN.cos=new Float32Array(N/2);DN.sin=new Float32Array(N/2);
+  for(let i=0;i<N/2;i++){DN.cos[i]=Math.cos(2*Math.PI*i/N);DN.sin[i]=-Math.sin(2*Math.PI*i/N)}
+  DN.rev=new Uint16Array(N);const bits=Math.log2(N);for(let i=0;i<N;i++){let r=0;for(let b=0;b<bits;b++)r|=((i>>b)&1)<<(bits-1-b);DN.rev[i]=r}
+}
+function fft(re,im,inv){
+  const N=re.length,rv=DN.rev;
+  for(let i=0;i<N;i++){const j=rv[i];if(j>i){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t}}
+  for(let size=2;size<=N;size<<=1){const half=size>>1,step=N/size;
+    for(let i=0;i<N;i+=size)for(let j=0;j<half;j++){const k=j*step,wr=DN.cos[k],wi=inv?-DN.sin[k]:DN.sin[k],a=i+j,b=a+half;
+      const tr=re[b]*wr-im[b]*wi,ti=re[b]*wi+im[b]*wr;re[b]=re[a]-tr;im[b]=im[a]-ti;re[a]+=tr;im[a]+=ti}}
+}
+function denoise(x,rate){
+  if(DN.rate!==rate)dnInit(rate);
+  const N=DN.N,H=DN.H,K=N/2+1;
+  let inb=new Float32Array(DN.inb.length+x.length);inb.set(DN.inb);inb.set(x,DN.inb.length);
+  const out=[];
+  while(inb.length>=N){
+    const re=DN.re,im=DN.im,w=DN.win;
+    for(let i=0;i<N;i++){re[i]=inb[i]*w[i];im[i]=0}
+    fft(re,im,false);
+    if(!DN.noise){DN.noise=new Float32Array(K);DN.ps=new Float32Array(K);for(let k=0;k<K;k++)DN.ps[k]=DN.noise[k]=re[k]*re[k]+im[k]*im[k]+1e-9}
+    const nz=DN.noise,ps=DN.ps,g=DN.g;
+    for(let k=0;k<K;k++){
+      const p=re[k]*re[k]+im[k]*im[k]+1e-12;
+      ps[k]=ps[k]*.7+p*.3;                                // طاقة كل تردد (منعّمة)
+      nz[k]=ps[k]<nz[k]?nz[k]*.9+ps[k]*.1:nz[k]*1.002+1e-12; // نتابع أقل مستوى = صوت الخلفية
+      let G=1-7.5*nz[k]/ps[k];if(G<.02)G=.02;            // نطرح الخلفية بقوة (حوالي 15 ديسيبل) والكلام يبقى زي ما هو
+      g[k]=G>g[k]?G*.7+g[k]*.3:G*.4+g[k]*.6;
+      re[k]*=g[k];im[k]*=g[k];if(k>0&&k<N/2){re[N-k]*=g[k];im[N-k]*=g[k]}
+    }
+    fft(re,im,true);
+    for(let i=0;i<H;i++)out.push(DN.ola[i]+re[i]/N*w[i]);
+    for(let i=0;i<H;i++)DN.ola[i]=re[i+H]/N*w[i+H];
+    inb=inb.slice(H);
+  }
+  DN.inb=inb;return out;
+}
 const V = {iso:!!LS.get('mj_iso',false),on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
 const useOpus = ()=>!!(CAP.o&&C.room&&C.room.codec==='o');
 function voiceCtx(){
@@ -729,7 +779,7 @@ async function micToggle(){
   V.flt=[hp,lp];
   V.src.connect(hp);hp.connect(lp);lp.connect(V.proc);V.proc.connect(V.mute);V.mute.connect(ctx.destination);
   voiceWake();setTimeout(voiceReroute,300);setTimeout(voiceWake,1200); // الآيفون يغيّر مخرج الصوت بعد تشغيل المايك
-  V.tail=new Float32Array(0);V.pos=0;V.hang=0;V.proc.onaudioprocess=micChunk;V.on=true;
+  V.tail=new Float32Array(0);V.pos=0;V.hang=0;DN.rate=0;V.proc.onaudioprocess=micChunk;V.on=true;
   sendHost({t:'ms',d:{on:true}});
   render();toast('🎙️ المايك شغال');
 }
@@ -752,7 +802,7 @@ function micConstraints(){
 }
 const micLp = ()=>V.iso?ISO.lp[1]:(useOpus()?11000:ISO.lp[0]);
 async function isoToggle(){
-  V.iso=!V.iso;LS.set('mj_iso',V.iso);
+  V.iso=!V.iso;LS.set('mj_iso',V.iso);DN.rate=0;
   const tr=V.stream&&V.stream.getAudioTracks()[0];
   if(tr){
     try{await tr.applyConstraints(micConstraints())}catch(e){}
@@ -780,9 +830,9 @@ function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};Object.values(V.dec).f
 function opusEnc(){
   if(V.enc&&V.enc.state==='configured')return V.enc;
   try{
-    V.enc=new AudioEncoder({output:ch=>{const u=new Uint8Array(ch.byteLength);ch.copyTo(u);V.ob.push(u);if(V.ob.length>=3)opusFlush()},
+    V.enc=new AudioEncoder({output:ch=>{const u=new Uint8Array(ch.byteLength);ch.copyTo(u);V.ob.push(u);if(V.ob.length>=2)opusFlush()},
       error:()=>{V.enc=null;CAP.o=false;if(C.joined)sendHost({t:'cp',d:{o:false}})}}); // لو تعطّل: نرجع للطريقة القديمة
-    V.enc.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1,bitrate:24000,opus:{frameDuration:20000,useinbandfec:true,packetlossperc:10}});
+    V.enc.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1,bitrate:16000,opus:{frameDuration:40000,useinbandfec:true,packetlossperc:10}});
     V.ets=0;return V.enc;
   }catch(e){V.enc=null;CAP.o=false;if(C.joined)sendHost({t:'cp',d:{o:false}});return null}
 }
@@ -792,10 +842,12 @@ function micChunk(e){
   const opus=useOpus(),rate=opus?OSR:VR;
   if(V.flt){const f=micLp();if(V.flt[1].frequency.value!==f)V.flt[1].frequency.value=f}
   const inp=e.inputBuffer.getChannelData(0),buf=new Float32Array(V.tail.length+inp.length);buf.set(V.tail);buf.set(inp,V.tail.length);
-  const r=V.ctx.sampleRate/rate,out=[];let pos=V.pos,sq=0;
-  while(pos+r<=buf.length){const a=Math.floor(pos),b=Math.max(a+1,Math.floor(pos+r));let s=0;for(let i=a;i<b;i++)s+=buf[i];s/=(b-a);out.push(s);sq+=s*s;pos+=r}
+  const r=V.ctx.sampleRate/rate,raw=[];let pos=V.pos,sq=0;
+  while(pos+r<=buf.length){const a=Math.floor(pos),b=Math.max(a+1,Math.floor(pos+r));let s=0;for(let i=a;i<b;i++)s+=buf[i];s/=(b-a);raw.push(s);pos+=r}
   const cut=Math.floor(pos);V.tail=buf.slice(cut);V.pos=pos-cut;
+  const out=V.iso?Array.from(denoise(Float32Array.from(raw),rate)):raw; // عزل الصوت: نشيل الضوضاء الثابتة (مكيف، مروحة، زحمة)
   if(!out.length)return;
+  for(let i=0;i<out.length;i++)sq+=out[i]*out[i];
   if(Math.sqrt(sq/out.length)>(V.iso?ISO.gate[1]:ISO.gate[0])){V.hang=10;C.talk[C.me]=performance.now()}else if(V.hang>0)V.hang--;else return; // ما نرسل وقت السكوت
   if(V.hang===0){const L=Math.min(out.length,96);for(let i=0;i<L;i++)out[out.length-1-i]*=i/L} // تخفيت آخر مقطع عشان ما تطلع طقّة
   if(opus){
@@ -852,7 +904,7 @@ function voicePlay(d){
         error:()=>{V.dec[from]=null}});
         dec.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1});}catch(e){V.dec[d.f]=null;return}
     }
-    for(const b of d.o){try{const t=(V.dts[d.f]=(V.dts[d.f]||0)+20000);dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
+    for(const b of d.o){try{const t=(V.dts[d.f]=(V.dts[d.f]||0)+40000);dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
     return;
   }
   if(typeof d.a!=='string')return;
@@ -980,7 +1032,7 @@ async function shareTick(){
     S.sx.drawImage(S.cv,0,0,64,36);const px=S.sx.getImageData(0,0,64,36).data;
     let changed=!S.sig;
     if(S.sig){for(let i=0;i<px.length;i+=4){if(Math.abs(px[i]-S.sig[i])+Math.abs(px[i+1]-S.sig[i+1])+Math.abs(px[i+2]-S.sig[i+2])>6){changed=true;break}}}
-    if(!changed&&now-S.last<(S.img?6000:4000))return; // ما تغيّر شي: ما نرسل
+    if(!changed&&now-S.last<(S.img?10000:8000))return; // ما تغيّر شي: ما نرسل
     S.sig=px.slice();S.last=now;
     const m=S.webp?'w':'j',url=S.cv.toDataURL(S.webp?'image/webp':'image/jpeg',L.q),a=url.slice(url.indexOf(',')+1);
     const fid=++S.fid,CH=15000,n=Math.ceil(a.length/CH),parts=[];
@@ -1036,7 +1088,7 @@ const initial = s=>{const a=Array.from(String(s||'').trim());return a.length?a[0
 function render(){
   updateChips();
   let h='';
-  if(!C.joined)h=C.screen==='connecting'?vWait(C.connMsg||'جاري الاتصال…'):C.screen==='pin'?vPin():vHome();
+  if(!C.joined)h=C.screen==='connecting'?vWait(C.connMsg||'جاري الاتصال…'):C.screen==='pin'?vPin():C.screen==='rooms'?vRooms():vHome();
   else h=vRoom();
   const fe=document.activeElement,fid=fe&&fe.id&&app.contains(fe)?fe.id:null,val=fid?fe.value:null;
   app.innerHTML=h;
@@ -1060,10 +1112,42 @@ function vHome(){
      '<button class="btn" data-a="create"><span>🌐 غرفة عامة</span><small>أي أحد معه الكود يدخل</small></button>'+
      '<button class="btn vio" data-a="createp"><span>🔒 غرفة خاصة</span><small>كود + رقم سري، والرابط يدخل على طول</small></button></div></div>';
   h+='<div class="card"><div class="sect">🚪 ادخل غرفة</div>'+
+     '<button class="btn teal" style="margin-top:0" data-a="rooms">🌐 ادخل غرفة عامة <small style="font-weight:600;opacity:.85">(شوف الغرف المفتوحة)</small></button>'+
+     '<div class="or">أو</div>'+
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
   return h+'</div>';
+}
+/* ---------- الغرف العامة المفتوحة ---------- */
+let RoomsConns=null,roomsRT=null,roomsTick=null;
+async function openRooms(){
+  closeRoomsConns();C.screen='rooms';C.rooms={};C.roomsLoading=true;render();
+  const conns=await connectAll();
+  if(C.screen!=='rooms'){conns.forEach(c=>c.mq.end());return}
+  RoomsConns=conns;
+  if(!conns.length){C.roomsLoading=false;toast('تعذّر الاتصال بالخوادم، تأكد من النت');render();return}
+  const pre=TOPIC_ROOT+'list/';
+  conns.forEach(c=>{c.mq.on((t,p)=>{
+    if(!t.startsWith(pre))return;const key=t.slice(pre.length);
+    if(!p)delete C.rooms[key];else{try{const r=JSON.parse(p);if(r&&r.code&&!r.priv){r.b=c.idx;C.rooms[key]=r;
+      if(Date.now()-r.ts>6*60000)try{c.mq.publish(t,'',true)}catch(e){}}}catch(e){}} // تنظيف الغرف القديمة
+    if(!roomsRT)roomsRT=setTimeout(()=>{roomsRT=null;if(C.screen==='rooms')render()},250);
+  });c.mq.subscribe(pre+'+')});
+  setTimeout(()=>{C.roomsLoading=false;if(C.screen==='rooms')render()},2500);
+  clearInterval(roomsTick);roomsTick=setInterval(()=>{if(C.screen==='rooms')render();else closeRoomsConns()},5000);
+}
+function closeRoomsConns(){clearInterval(roomsTick);if(RoomsConns){RoomsConns.forEach(c=>c.mq.end());RoomsConns=null}}
+function vRooms(){
+  const now=Date.now(),seen=new Set();
+  const list=Object.values(C.rooms||{}).filter(r=>Math.abs(now-r.ts)<75000&&!seen.has(r.code)&&seen.add(r.code))
+    .sort((a,b)=>((a.n<(a.max||MAX_PEOPLE))===(b.n<(b.max||MAX_PEOPLE))?0:(a.n<(a.max||MAX_PEOPLE)?-1:1))||(b.n-a.n)||(b.ts-a.ts));
+  let h='<div class="home"><div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><div class="sect" style="margin:0">🌐 الغرف العامة المفتوحة</div><button class="chip" data-a="rooms">🔄 تحديث</button></div>';
+  if(!list.length)h+=C.roomsLoading?'<div class="spin" style="margin:20px auto"></div><div class="c mut">نجمع الغرف…</div>':'<div class="c" style="padding:14px 0"><div style="font-size:46px">🏜️</div><div style="font-weight:800;margin:6px 0">ما فيه غرف عامة الحين</div><div class="hint">القائمة تتحدث لحالها، أو سوّ غرفتك</div></div>';
+  h+=list.map(r=>{const mx=r.max||MAX_PEOPLE,full=r.n>=mx;
+    return'<div class="room"><div class="rav" style="--h:'+hue(r.host||r.code)+'">'+esc(initial(r.host||'؟'))+'</div><div class="ri"><div class="rn">غرفة '+esc(r.host||'مضيف')+'</div><div class="rs">👥 '+r.n+'/'+mx+' · <span style="direction:ltr">#'+esc(r.code)+'</span></div></div>'+
+      (full?'<button class="btn sec small auto" disabled>ممتلئة</button>':'<button class="btn teal small auto" data-a="joinroom" data-v="'+esc(r.code)+'">ادخل</button>')+'</div>'}).join('');
+  return h+'</div><button class="btn" data-a="create">🌐 سوّ غرفة عامة</button><button class="btn ghost small" data-a="cancel">رجوع</button></div>';
 }
 function vPin(){
   const r=C.pinFor||{};
@@ -1129,8 +1213,10 @@ document.addEventListener('click',e=>{
   const el=e.target.closest('[data-a]');if(!el||el.disabled)return;
   const a=el.dataset.a,v=el.dataset.v;
   switch(a){
-    case 'create':createRoom(false);break;
-    case 'createp':createRoom(true);break;
+    case 'create':closeRoomsConns();createRoom(false);break;
+    case 'createp':closeRoomsConns();createRoom(true);break;
+    case 'rooms':openRooms();break;
+    case 'joinroom':closeRoomsConns();joinRoom(v,null);break;
     case 'joinlk':joinFrom(($('#lk')||{}).value);break;
     case 'joincd':{const c=(($('#cd')||{}).value||'').replace(/\D/g,'');if(c.length!==5){toast('الكود 5 أرقام');break}joinRoom(c,null);break}
     case 'joinpin':{const p=(($('#pn')||{}).value||'').replace(/\D/g,'');if(p.length!==4){toast('الرقم السري 4 أرقام');break}joinRoom(C.pinFor.room,p);break}
@@ -1157,7 +1243,7 @@ $('#app').addEventListener('keydown',e=>{
   const m={lk:'joinlk',cd:'joincd',pn:'joinpin'}[e.target.id];if(m){const b=document.querySelector('[data-a='+m+']');if(b)b.click()}
 });
 /* تفعيل الصوت: داخل الغرفة بأي ضغطة، وبره بس من أزرار الدخول (عشان ما يوقف الأغاني في جوالك وأنت بالصفحة الرئيسية) */
-const VOICE_KEYS=['create','createp','joinlk','joincd','joinpin'];
+const VOICE_KEYS=['create','createp','joinlk','joincd','joinpin','joinroom'];
 const voiceTap=e=>{if(C.joined||V.ctx){const was=soundOk();voiceCtx();if(!was&&C.joined)setTimeout(()=>{if(soundOk())render()},250);return}const el=e.target&&e.target.closest&&e.target.closest('[data-a]');if(el&&VOICE_KEYS.includes(el.dataset.a))voiceCtx()};
 document.addEventListener('click',voiceTap,true);
 ['touchend','pointerup'].forEach(ev=>document.addEventListener(ev,voiceTap,{capture:true,passive:true})); // الآيفون يحتاج لمسة عشان يشغّل الصوت
