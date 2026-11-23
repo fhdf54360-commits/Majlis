@@ -150,6 +150,7 @@ button.chip{cursor:pointer}
 @media (max-width:440px){.cb{min-width:0;padding:8px 9px;font-size:11px}.cb .i{font-size:21px}.bar{gap:6px;padding:7px}.namebox span{display:none}.logo span{display:none}.hero .big{font-size:42px}.code{font-size:28px}.bar{width:calc(100% - 12px);justify-content:space-between}.cb{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis}#chat{bottom:calc(84px + env(safe-area-inset-bottom))}}
 #toast{position:fixed;top:calc(14px + env(safe-area-inset-top));left:50%;transform:translate(-50%,-160px);background:#fff;color:#0b1120;font-weight:800;padding:12px 18px;border-radius:16px;z-index:99;transition:transform .3s;max-width:90vw;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.3);font-size:15px}
 #toast.show{transform:translate(-50%,0)}
+.volr{flex:1;min-width:0;height:34px;accent-color:var(--acc2);cursor:pointer}
 </style>
 </head>
 <body>
@@ -1494,7 +1495,7 @@ function updateChips(){
   if(Net.reconnecting)net='<span class="chip"><i class="dot x"></i> يعيد الاتصال…</span>';
   else if(Net.isHost)net='<span class="chip"><i class="dot d"></i> أنت المضيف</span>';
   else net='<span class="chip"><i class="dot '+(C.direct?'d':'s')+'"></i> '+(C.direct?'مباشر':'خادم')+(C.rtt!=null?' · '+C.rtt+'ms':'')+'</span>';
-  el.innerHTML='<button class="chip" data-a="copy" title="نسخ الرابط">#'+esc(Net.code||'')+'</button><span class="chip">👥 '+n+'</span>'+net+(MOBILE?'<button class="chip" data-a="spk" title="مخرج الصوت">'+(V.spk?'🔊 مكبر':'👂 سماعة')+'</button>':'');
+  el.innerHTML='<button class="chip" data-a="copy" title="نسخ الرابط">#'+esc(Net.code||'')+'</button><span class="chip">👥 '+n+'</span>'+net+'<button class="chip" data-a="vol" title="مستوى الصوت">'+volIcon()+' '+Math.round(V.vol*100)+'%</button>'+(MOBILE?'<button class="chip" data-a="spk" title="مخرج الصوت">'+(V.spk?'🔊 مكبر':'👂 سماعة')+'</button>':'');
 }
 function vWait(msg){return'<div class="c"><div class="spin"></div><div style="font-weight:800;font-size:18px">'+esc(msg)+'</div><button class="btn ghost small" style="margin:24px auto 0;max-width:200px" data-a="cancel">إلغاء</button></div>'}
 function vHome(){
@@ -1508,7 +1509,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
-  h+='<div class="hint" style="opacity:.6">النسخة 11 · صوت بدون تشويش مع الدول البعيدة</div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 12 · تقدر تعلّي وتوطّي الصوت من داخل الموقع</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
@@ -1663,6 +1664,35 @@ function copyLink(){
   if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(u).then(ok).catch(()=>fallbackCopy(u,ok));else fallbackCopy(u,ok);
 }
 function fallbackCopy(u,ok){const t=document.createElement('textarea');t.value=u;document.body.appendChild(t);t.select();try{document.execCommand('copy');ok()}catch(e){toast(u)}t.remove()}
+
+/* ================= 9.5) مستوى الصوت (النسخة 12) ==================
+   سلايدر داخل الموقع يعلّي ويوطّي صوت الناس (على المكبر والسماعة، جوال وكمبيوتر).
+   يغيّر V.out.gain بس (أول عقدة يمر عليها الصوت الجاي، قبل الرفع والضاغط)، وما يلمس المايك ولا الشبكة. ينحفظ في mj_vol (0 لين 2 = 0% لين 200%) */
+V.vol=(()=>{const v=Number(LS.get('mj_vol',1));return v>=0&&v<=2?v:1})();
+const volIcon = ()=>V.vol<=0?'🔇':V.vol<0.5?'🔈':V.vol<1?'🔉':'🔊';
+function volApply(){if(V.out&&V.out.gain&&Math.abs(V.out.gain.value-V.vol)>0.001){try{V.out.gain.value=V.vol}catch(e){}}}
+setInterval(volApply,250); // لو انبنى الصوت من جديد (voiceRebuild في الآيفون) يرجع نفس المستوى لحاله
+function volSet(v){
+  v=Math.round(Number(v)*20)/20;if(!isFinite(v))return;v=Math.max(0,Math.min(2,v));
+  V.vol=v;LS.set('mj_vol',v);volApply();
+  const r=$('#volr');if(r&&Number(r.value)!==Math.round(v*100))r.value=Math.round(v*100);
+  const t=$('#volt');if(t)t.textContent=volIcon()+' '+Math.round(v*100)+'%';
+  updateChips();
+}
+function openVolSheet(){
+  let h='<div class="sh-card"><div class="sh-t">مستوى الصوت</div>'+
+    '<div class="c" id="volt" style="font-size:30px;font-weight:800;margin:2px 0 10px">'+volIcon()+' '+Math.round(V.vol*100)+'%</div>'+
+    '<div class="row"><button class="btn sec small auto" data-a="volm">➖</button><input type="range" class="volr" id="volr" min="0" max="200" step="5" value="'+Math.round(V.vol*100)+'"><button class="btn sec small auto" data-a="volp">➕</button></div>'+
+    '<div class="hint">وقت ما المايك شغال، الجوال يخلي أزرار الصوت الجانبية على صوت المكالمة (هذا من نظام الجوال نفسه، والمتصفح ما يقدر يغيّره)، فاستخدم هذا عشان تعلّي وتوطّي. فوق 100% يرفع الصوت أكثر.</div>'+
+    '<button class="btn ghost small" data-a="sheetx">إغلاق</button></div>';
+  const m=$('#sheet');m.innerHTML=h;m.classList.add('show');
+  $('#volr').addEventListener('input',e=>volSet(e.target.value/100));
+}
+document.addEventListener('click',e=>{
+  const el=e.target.closest&&e.target.closest('[data-a]');if(!el)return;
+  const a=el.dataset.a;
+  if(a==='vol')openVolSheet();else if(a==='volm')volSet(V.vol-0.1);else if(a==='volp')volSet(V.vol+0.1);
+});
 
 /* للتجربة الآلية فقط */
 window.__mj={C,H,Net,V,S,F,CAP,CH};
