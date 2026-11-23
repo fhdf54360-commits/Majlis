@@ -789,7 +789,7 @@ function denoise(x,rate){
   }
   DN.inb=inb;return out;
 }
-const V = {iso:!!LS.get('mj_iso',false),isoDb:ISO_LV[LS.get('mj_isodb',30)]?LS.get('mj_isodb',30):30,on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
+const V = {spk:LS.get('mj_spk',true)!==false,iso:!!LS.get('mj_iso',false),isoDb:ISO_LV[LS.get('mj_isodb',30)]?LS.get('mj_isodb',30):30,on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
 const useOpus = ()=>!!(CAP.o&&C.room&&C.room.codec==='o');
 function voiceCtx(){
   if(!V.ctx){try{
@@ -817,6 +817,7 @@ function voiceWake(){
   audioMode(V.on?'play-and-record':'playback');
   if(V.ctx.state!=='running')V.ctx.resume().catch(()=>{});
   if(V.el&&V.el.paused)V.el.play().catch(()=>{});
+  applySink();
 }
 /* الآيفون أحيانًا يعلّق الصوت على سماعة الأذن بعد تشغيل/قفل المايك: نعيد ربط المشغّل عشان يرجع للمكبر */
 function voiceReroute(){
@@ -826,6 +827,7 @@ function voiceReroute(){
 }
 /* الآيفون يغيّر تردد الصوت لما يشتغل المايك أو يقفل، فالصوت القديم يطلع مشوّه أو مسرّع: نبني الصوت من جديد */
 const IOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const ANDROID=/Android/i.test(navigator.userAgent);
 function voiceRebuild(){
   const old=V.ctx,oel=V.el;if(!old)return;
   V.ctx=V.out=V.el=V.md=V.lp=null;V.next={};V.dl={};
@@ -834,7 +836,28 @@ function voiceRebuild(){
   try{old.close()}catch(e){}
 }
 /* آيفون: نخلي الصوت على المكبر (playback لما المايك مقفل، play-and-record لما شغال) */
-function audioMode(t){try{if(navigator.audioSession&&navigator.audioSession.type!==t)navigator.audioSession.type=t}catch(e){}}
+function audioMode(t){
+  // مكبر: 'auto' (سفاري يحط الصوت على المكبر) · سماعة الأذن: 'play-and-record' دايمًا
+  if(V.spk){if(t==='play-and-record')t='auto'}else t='play-and-record';
+  try{if(navigator.audioSession&&navigator.audioSession.type!==t)navigator.audioSession.type=t}catch(e){}}
+/* اختيار مخرج الصوت (مكبر أو سماعة الأذن) لو المتصفح يدعم setSinkId */
+async function applySink(){
+  if(!V.el||!V.el.setSinkId||!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
+  try{
+    const ds=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='audiooutput');
+    const re=V.spk?/speaker|loud|مكبر/i:/earpiece|receiver|handset|phone|سماعة/i;
+    const d=ds.find(x=>re.test(x.label)&&!(V.spk&&/ear|head|bluetooth/i.test(x.label)));
+    const id=d?d.deviceId:'';
+    if(V.el.sinkId!==id)await V.el.setSinkId(id);
+  }catch(e){}
+}
+async function spkToggle(){
+  V.spk=!V.spk;LS.set('mj_spk',V.spk);
+  audioMode(V.on?'play-and-record':'playback');applySink();
+  if(V.on&&!V.busy){micOff();await micToggle()} // نعيد تشغيل المايك بالإعداد الجديد (الأندرويد يغيّر المخرج حسبه)
+  else voiceReroute();
+  render();toast(V.spk?'🔊 الصوت على المكبر':'👂 الصوت على سماعة الأذن');
+}
 function mulawEnc(x){let s=Math.round(Math.max(-1,Math.min(1,x))*32767);const sign=s<0?0x80:0;if(s<0)s=-s;s=Math.min(s,32635)+132;let e=7;for(let m=0x4000;(s&m)===0&&e>0;m>>=1)e--;return(~(sign|(e<<4)|((s>>(e+3))&0x0F)))&0xFF}
 function mulawDec(u){u=~u&0xFF;const e=(u>>4)&7,t=(((u&0x0F)<<3)+132)<<e;return((u&0x80)?132-t:t-132)/32768}
 async function micToggle(){
@@ -874,7 +897,7 @@ function micOff(){
   setTimeout(voiceReroute,300);
 }
 function micConstraints(){
-  const c={echoCancellation:true,noiseSuppression:V.iso,autoGainControl:true,channelCount:1};
+  const c={echoCancellation:!(ANDROID&&V.spk),noiseSuppression:V.iso,autoGainControl:true,channelCount:1};
   try{if(V.iso&&navigator.mediaDevices.getSupportedConstraints().voiceIsolation)c.voiceIsolation=true}catch(e){}
   return c;
 }
@@ -1451,7 +1474,7 @@ function updateChips(){
   if(Net.reconnecting)net='<span class="chip"><i class="dot x"></i> يعيد الاتصال…</span>';
   else if(Net.isHost)net='<span class="chip"><i class="dot d"></i> أنت المضيف</span>';
   else net='<span class="chip"><i class="dot '+(C.direct?'d':'s')+'"></i> '+(C.direct?'مباشر':'خادم')+(C.rtt!=null?' · '+C.rtt+'ms':'')+'</span>';
-  el.innerHTML='<button class="chip" data-a="copy" title="نسخ الرابط">#'+esc(Net.code||'')+'</button><span class="chip">👥 '+n+'</span>'+net;
+  el.innerHTML='<button class="chip" data-a="copy" title="نسخ الرابط">#'+esc(Net.code||'')+'</button><span class="chip">👥 '+n+'</span>'+net+(MOBILE?'<button class="chip" data-a="spk" title="مخرج الصوت">'+(V.spk?'🔊 مكبر':'👂 سماعة')+'</button>':'');
 }
 function vWait(msg){return'<div class="c"><div class="spin"></div><div style="font-weight:800;font-size:18px">'+esc(msg)+'</div><button class="btn ghost small" style="margin:24px auto 0;max-width:200px" data-a="cancel">إلغاء</button></div>'}
 function vHome(){
@@ -1465,7 +1488,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
-  h+='<div class="hint" style="opacity:.6">النسخة 9 · صوت الفيديو وعرض الشاشة + صوت أنقى</div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 10 · اختيار المكبر أو سماعة الأذن بالجوال</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
@@ -1579,6 +1602,7 @@ document.addEventListener('click',e=>{
     case 'invite':if(navigator.share)navigator.share({title:'مجلس',text:'تعال ادخل الاجتماع معي 📞'+(C.room&&C.room.priv?'':' — الكود: '+Net.code),url:roomLink()}).catch(()=>{});else copyLink();break;
     case 'sound':voiceCtx();setTimeout(render,250);break;
     case 'mic':micToggle();break;
+    case 'spk':spkToggle();break;
     case 'share':if(S.on){shareStop(true);render();toast('⏹️ وقفت العرض')}else openSheet();break;
     case 'src':if(v==='screen')shareStart('screen');else if(v==='camb')shareStart('cam','environment');else if(v==='camf')shareStart('cam','user');else if(v==='img'){$('#imgpick').click();closeSheet()}else if(v==='vid'){$('#vidpick').click();closeSheet()}break;
     case 'iso':openIsoSheet();break;
