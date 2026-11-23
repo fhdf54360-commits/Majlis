@@ -114,6 +114,7 @@ button.chip{cursor:pointer}
 .sh-o .i{font-size:28px}
 .sh-o b{display:block;font-size:16px}.sh-o small{display:block;color:var(--mut);font-size:12.5px;font-weight:600}
 .sh-o:active{background:rgba(59,130,246,.2)}
+.sh-o.sel{border-color:var(--ok);background:rgba(34,197,94,.12)}
 #imgpick,#vidpick{display:none}
 .room{display:flex;align-items:center;gap:10px;padding:10px;border-radius:16px;background:rgba(255,255,255,.05);border:1px solid var(--line);margin:8px 0}
 .room .rav{width:44px;height:44px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;background:hsl(var(--h) 55% 42%)}
@@ -701,7 +702,16 @@ const CAPP = (async()=>{try{
 })();
 /* عزل الصوت (زر في الشريط تحت، طافي بالبداية): يشغّل كاتم الضوضاء في المتصفح (وعزل الصوت لو مدعوم)،
    ويضيّق الفلاتر، ويرفع حد السكوت عشان أصوات الخلفية ما تنرسل */
-const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.012],near:0.32};
+const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.012]};
+/* مستويات عزل الصوت (يختارها المستخدم): f قوة الطرح، g أقل نسبة للضوضاء (= الديسيبل)، near بوابة الأصوات الأضعف من صوتك (0 = طافية) */
+const ISO_LV = {
+  16:{f:3,  g:0.158, near:0},
+  25:{f:5,  g:0.056, near:0.15},
+  30:{f:6,  g:0.032, near:0.2},
+  45:{f:8.5,g:0.0056,near:0.28},
+  50:{f:10, g:0.0032,near:0.32},
+};
+const isoL = ()=>ISO_LV[V.isoDb]||ISO_LV[30];
 /* كاتم ضوضاء خاص بالموقع (يشتغل مع عزل الصوت): يتعلّم صوت الخلفية الثابت (مكيف، مروحة، زحمة)
    ويطرحه من الصوت بتحليل الترددات (FFT 512 بتداخل نص). يشتغل على أي جهاز حتى لو المتصفح ما يدعم العزل. */
 const DN = {rate:0,N:512,H:256,win:null,inb:new Float32Array(0),ola:null,noise:null,ps:null,g:null,re:null,im:null,cos:null,sin:null,rev:null};
@@ -721,7 +731,7 @@ function fft(re,im,inv){
 }
 function denoise(x,rate){
   if(DN.rate!==rate)dnInit(rate);
-  const N=DN.N,H=DN.H,K=N/2+1;
+  const N=DN.N,H=DN.H,K=N/2+1,IL=isoL();
   let inb=new Float32Array(DN.inb.length+x.length);inb.set(DN.inb);inb.set(x,DN.inb.length);
   const out=[];
   while(inb.length>=N){
@@ -734,7 +744,7 @@ function denoise(x,rate){
       const p=re[k]*re[k]+im[k]*im[k]+1e-12;
       ps[k]=ps[k]*.7+p*.3;                                // طاقة كل تردد (منعّمة)
       nz[k]=ps[k]<nz[k]?nz[k]*.9+ps[k]*.1:nz[k]*1.002+1e-12; // نتابع أقل مستوى = صوت الخلفية
-      let G=1-10*nz[k]/ps[k];if(G<.003)G=.003;           // نطرح الخلفية بقوة (لين 50 ديسيبل) والكلام يبقى زي ما هو
+      let G=1-IL.f*nz[k]/ps[k];if(G<IL.g)G=IL.g;         // نطرح الخلفية حسب المستوى المختار (16 لين 50 ديسيبل) والكلام يبقى زي ما هو
       g[k]=G>g[k]?G*.7+g[k]*.3:G*.4+g[k]*.6;
       re[k]*=g[k];im[k]*=g[k];if(k>0&&k<N/2){re[N-k]*=g[k];im[N-k]*=g[k]}
     }
@@ -745,7 +755,7 @@ function denoise(x,rate){
   }
   DN.inb=inb;return out;
 }
-const V = {iso:!!LS.get('mj_iso',false),on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
+const V = {iso:!!LS.get('mj_iso',false),isoDb:ISO_LV[LS.get('mj_isodb',30)]?LS.get('mj_isodb',30):30,on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
 const useOpus = ()=>!!(CAP.o&&C.room&&C.room.codec==='o');
 function voiceCtx(){
   if(!V.ctx){try{
@@ -857,7 +867,7 @@ async function isoToggle(){
     }
   }
   if(V.flt){V.flt[0].frequency.value=V.iso?ISO.hp[1]:ISO.hp[0];V.flt[1].frequency.value=micLp()}
-  render();toast(V.iso?'🎧 العزل القوي شغال — يشيل الضوضاء والأصوات البعيدة. ما يزيد النت (بالعكس يقلله)، بس يستهلك بطارية أكثر شوي 🔋':'عزل الصوت طافي');
+  render();toast(V.iso?'🎧 عزل الصوت شغال ('+V.isoDb+' ديسيبل). ما يزيد النت (بالعكس يقلله)، بس يستهلك بطارية أكثر شوي 🔋':'عزل الصوت طافي');
 }
 function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};Object.values(V.dec).forEach(d=>{try{d.close()}catch(e){}});V.dec={};V.dts={}}
 /* مشفّر Opus */
@@ -885,7 +895,7 @@ function micChunk(e){
   const rms=Math.sqrt(sq/out.length);let thr=V.iso?ISO.gate[1]:ISO.gate[0];
   if(V.iso){ // بوابة قريبة: نتعلّم قوة صوتك أنت (قريب من المايك)، وأي صوت أضعف منه بـ 10 ديسيبل (ناس جنبك أو بعيد) ما ينرسل
     if(rms>thr)V.pk=Math.max(rms,(V.pk||0)*0.998);else V.pk=(V.pk||0)*0.9995;
-    thr=Math.max(thr,(V.pk||0)*ISO.near);
+    thr=Math.max(thr,(V.pk||0)*isoL().near);
   }
   if(rms>thr){V.hang=V.iso?6:10;C.talk[C.me]=performance.now()}
   else if(V.hang>0){V.hang--;if(V.iso){const g=Math.min(1,(rms/thr)*(rms/thr));for(let i=0;i<out.length;i++)out[i]*=g}}
@@ -993,6 +1003,21 @@ function openSheet(){
   if(MOBILE)h+='<div class="hint">📱 الآيفون والأندرويد ما يسمحون لأي موقع يعرض الشاشة مباشرة. البدائل: «تسجيل شاشة»، أو «لقطة شاشة»، أو اعكس شاشة جوالك على كمبيوتر (AirPlay أو Phone Link) وادخل من الكمبيوتر واعرض الشاشة.</div>';
   h+='<button class="btn ghost small" data-a="sheetx">إلغاء</button></div>';
   const m=$('#sheet');m.innerHTML=h;m.classList.add('show');
+}
+function openIsoSheet(){
+  const d={16:'خفيف — يشيل الطنين والمكيف',25:'متوسط',30:'قوي — مناسب لأغلب الأماكن',45:'قوي جدًا — يقلل أصوات الناس البعيدين',50:'أقصى عزل — للأماكن الزحمة (ممكن الصوت يصير أنحف شوي)'};
+  let h='<div class="sh-card"><div class="sh-t">🎧 مستوى عزل الصوت</div>';
+  h+=Object.keys(ISO_LV).map(db=>'<button class="sh-o'+(V.iso&&String(V.isoDb)===db?' sel':'')+'" data-a="isolv" data-v="'+db+'"><span class="i">'+(V.iso&&String(V.isoDb)===db?'✅':'🎚️')+'</span><span><b>'+db+' ديسيبل</b><small>'+d[db]+'</small></span></button>').join('');
+  h+='<button class="sh-o'+(V.iso?'':' sel')+'" data-a="isolv" data-v="off"><span class="i">'+(V.iso?'⭕':'✅')+'</span><span><b>إيقاف العزل</b><small>صوتك طبيعي بدون تنقية</small></span></button>';
+  h+='<div class="hint">العزل ما يزيد استهلاك النت (بالعكس يقلله)، بس يستهلك بطارية ومعالج أكثر شوي 🔋</div><button class="btn ghost small" data-a="sheetx">إغلاق</button></div>';
+  const m=$('#sheet');m.innerHTML=h;m.classList.add('show');
+}
+function setIso(v){
+  closeSheet();
+  if(v==='off'){if(V.iso)isoToggle();return}
+  const db=Number(v);if(!ISO_LV[db])return;
+  V.isoDb=db;LS.set('mj_isodb',db);DN.rate=0;V.pk=0;
+  if(!V.iso)isoToggle();else{render();toast('🎧 عزل الصوت: '+db+' ديسيبل')}
 }
 function closeSheet(){const m=$('#sheet');if(m){m.classList.remove('show');m.innerHTML=''}}
 async function loadImg(file){
@@ -1236,7 +1261,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
-  h+='<div class="hint" style="opacity:.6">النسخة 5 · فيديو سلس + عزل صوت قوي</div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 6 · مستويات عزل الصوت</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
@@ -1296,7 +1321,7 @@ function vRoom(){
       '<div class="mi'+(mic?' on':'')+'">'+(mic?'🎙️':'🔇')+'</div>'+(p.host?'':'<div class="cn" title="'+(p.direct?'اتصال مباشر':'عبر الخادم')+'">'+(p.direct?'⚡':'☁️')+'</div>')+'</div>'}).join('')+'</div>';
   h+='<div class="bar">'+
     '<button class="cb '+(V.on?'on':'off')+'" data-a="mic"><span class="i">'+(V.on?'🎙️':'🔇')+'</span>'+(V.on?'المايك شغال':'المايك مقفل')+'</button>'+
-    '<button class="cb'+(V.iso?' on':'')+'" data-a="iso"><span class="i">🎧</span>'+(V.iso?'العزل شغال 🔋':'عزل الصوت')+'</button>'+
+    '<button class="cb'+(V.iso?' on':'')+'" data-a="iso"><span class="i">🎧</span>'+(V.iso?'العزل '+V.isoDb+'dB 🔋':'عزل الصوت')+'</button>'+
     '<button class="cb'+(S.on?' on':'')+'" data-a="share"><span class="i">'+(S.on?'⏹️':'🖥️')+'</span>'+(S.on?'إيقاف العرض':'اعرض')+'</button>'+
     '<button class="cb" data-a="invite"><span class="i">🔗</span>دعوة</button>'+
     '<button class="cb leave" data-a="leave"><span class="i">📞</span>خروج</button></div>';
@@ -1350,7 +1375,8 @@ document.addEventListener('click',e=>{
     case 'mic':micToggle();break;
     case 'share':if(S.on){shareStop(true);render();toast('⏹️ وقفت العرض')}else openSheet();break;
     case 'src':if(v==='screen')shareStart('screen');else if(v==='camb')shareStart('cam','environment');else if(v==='camf')shareStart('cam','user');else if(v==='img'){$('#imgpick').click();closeSheet()}else if(v==='vid'){$('#vidpick').click();closeSheet()}break;
-    case 'iso':isoToggle();break;
+    case 'iso':openIsoSheet();break;
+    case 'isolv':setIso(v);break;
     case 'vidpp':if(S.video){if(S.video.paused)S.video.play().catch(()=>{});else S.video.pause();setTimeout(updateStage,50)}break;
     case 'vidre':if(S.video){S.video.currentTime=0;S.video.play().catch(()=>{});setTimeout(updateStage,50)}break;
     case 'flip':shareStart('cam',S.facing==='user'?'environment':'user');break;
