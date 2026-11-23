@@ -584,7 +584,7 @@ function parseJoin(s){
   if(/^\d{5}$/.test(s))return{room:s,b:null,k:null};
   try{const u=new URL(s,location.href);const room=u.searchParams.get('room');if(!room||!/^\d{5}$/.test(room))return null;return{room,b:u.searchParams.get('b'),k:u.searchParams.get('k')}}catch(e){return null}
 }
-const C = {screen:'home',joined:false,me:null,room:null,direct:false,rtt:null,lastHost:0,connMsg:'',talk:{},frameUrl:null,max:false,pending:URLP.get('room')?parseJoin(location.href):null,pinFor:null,pinErr:false};
+const C = {screen:'home',joined:false,me:null,room:null,direct:false,rtt:null,rttS:null,weak:false,lastHost:0,connMsg:'',talk:{},frameUrl:null,max:false,pending:URLP.get('room')?parseJoin(location.href):null,pinFor:null,pinErr:false};
 let GUEST=null;
 const myName = ()=>{const v=(LS.get('mj_name','')||'').trim();if(v)return cleanName(v);if(!GUEST)GUEST='ضيف '+(10+rand(89));return GUEST};
 const pname = id=>{const p=C.room&&C.room.players.find(x=>x.id===id);return p?p.name:'مشارك'};
@@ -620,7 +620,8 @@ function clientHandle(m){
       if(d.k==='sq')lvDown();
       if(d.k==='kf')S.needKey=true;
       return;
-    case 'po':if(d.ts!=null)C.rtt=Math.round(performance.now()-d.ts);updateChips();return;
+    case 'po':if(d.ts!=null){C.rtt=Math.round(performance.now()-d.ts);C.rttS=C.rttS==null?C.rtt:C.rttS*.7+C.rtt*.3; // بنق منعّم + هامش: ما يتنطط بين العادي والضعيف (كان يقطّع الصوت مع الدول البعيدة)
+      if(!C.weak&&C.rttS>300)C.weak=true;else if(C.weak&&C.rttS<220)C.weak=false}updateChips();return;
     case 'rtc':clientRtc(d);return;
     case 'ice':clientIce(d);return;
     case 'vc':voicePlay(d);return;
@@ -682,7 +683,7 @@ function leaveRoom(silent){
   if(Net.hp){try{Net.hp.pc.close()}catch(e){}Net.hp=null}
   const mq=Net.mq;Net.mq=null;if(mq)setTimeout(()=>mq.end(),120);
   clearFrame();chatReset();
-  Object.assign(C,{joined:false,me:null,room:null,direct:false,rtt:null,screen:'home',max:false,talk:{},pending:null});
+  Object.assign(C,{joined:false,me:null,room:null,direct:false,rtt:null,rttS:null,weak:false,screen:'home',max:false,talk:{},pending:null});
   Net.isHost=false;Net.code=null;Net.key=null;
   history.replaceState(null,'',location.pathname+(URLP.get('broker')?'?broker='+encodeURIComponent(URLP.get('broker')):''));
   render();
@@ -789,12 +790,13 @@ function denoise(x,rate){
   }
   DN.inb=inb;return out;
 }
-const V = {spk:LS.get('mj_spk',true)!==false,iso:!!LS.get('mj_iso',false),isoDb:ISO_LV[LS.get('mj_isodb',30)]?LS.get('mj_isodb',30):30,on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
+const V = {spk:LS.get('mj_spk',true)!==false,iso:!!LS.get('mj_iso',false),isoDb:ISO_LV[LS.get('mj_isodb',30)]?LS.get('mj_isodb',30):30,on:false,busy:false,ctx:null,out:null,lp:null,el:null,flt:null,stream:null,src:null,proc:null,mute:null,tail:new Float32Array(0),pos:0,hang:0,seq:Date.now(),next:{},seqs:{},dl:{},far:[],pg:{},dq:{},ech:0,own:0,rebuilt:false,enc:null,ets:0,ob:[],dec:{},dts:{}};
 const useOpus = ()=>!!(CAP.o&&C.room&&C.room.codec==='o');
 function voiceCtx(){
   if(!V.ctx){try{
     V.ctx=new (window.AudioContext||window.webkitAudioContext)();V.out=V.ctx.createGain();
     const lp=V.lp=V.ctx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=useOpus()?11000:7200;V.out.connect(lp); // ينعّم الصوت الواصل
+    const l8=V.lp8=V.ctx.createBiquadFilter();l8.type='lowpass';l8.frequency.value=3700;l8.Q.value=0.6;l8.connect(V.out); // صوت 8kHz (النت الضعيف): يشيل الخشخشة الحادة اللي فوق 4kHz
     // رفع الصوت مع ضاغط يمنع التشويش لو علا (الآيفون يوطّي الصوت وقت المايك)
     const boost=V.ctx.createGain();boost.gain.value=2;
     const comp=V.ctx.createDynamicsCompressor();comp.threshold.value=-10;comp.knee.value=6;comp.ratio.value=12;comp.attack.value=0.002;comp.release.value=0.15;
@@ -830,7 +832,7 @@ const IOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==='Mac
 const ANDROID=/Android/i.test(navigator.userAgent);
 function voiceRebuild(){
   const old=V.ctx,oel=V.el;if(!old)return;
-  V.ctx=V.out=V.el=V.md=V.lp=null;V.next={};V.dl={};
+  V.ctx=V.out=V.el=V.md=V.lp=V.lp8=null;V.next={};V.dl={};V.far=[];V.pg={};
   if(oel){try{oel.pause();oel.srcObject=null;oel.remove()}catch(e){}}
   voiceCtx();
   try{old.close()}catch(e){}
@@ -880,7 +882,7 @@ async function micToggle(){
   V.flt=[hp,lp];
   V.src.connect(hp);hp.connect(lp);lp.connect(V.proc);V.proc.connect(V.mute);V.mute.connect(ctx.destination);
   voiceWake();setTimeout(voiceReroute,300);setTimeout(voiceWake,1200); // الآيفون يغيّر مخرج الصوت بعد تشغيل المايك
-  V.tail=new Float32Array(0);V.pos=0;V.hang=0;V.pre=null;V.mb=[];DN.rate=0;V.proc.onaudioprocess=micChunk;V.on=true;
+  V.tail=new Float32Array(0);V.pos=0;V.hang=0;V.pre=null;V.mb=[];V.ech=0;V.own=0;DN.rate=0;V.proc.onaudioprocess=micChunk;V.on=true;
   sendHost({t:'ms',d:{on:true}});
   render();toast('🎙️ المايك شغال');
 }
@@ -926,7 +928,7 @@ async function isoToggle(){
   if(V.flt){V.flt[0].frequency.value=V.iso?ISO.hp[1]:ISO.hp[0];V.flt[1].frequency.value=micLp()}
   render();toast(V.iso?'🎧 عزل الصوت شغال ('+V.isoDb+' ديسيبل). ما يزيد النت (بالعكس يقلله)، بس يستهلك بطارية أكثر شوي 🔋':'عزل الصوت طافي');
 }
-function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};Object.values(V.dec).forEach(d=>{try{d.close()}catch(e){}});V.dec={};V.dts={}}
+function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};V.far=[];V.pg={};V.dq={};Object.values(V.dec).forEach(d=>{try{d.close()}catch(e){}});V.dec={};V.dts={}}
 /* مشفّر Opus */
 function opusEnc(){
   const br=weakNet()?12000:16000;
@@ -964,11 +966,18 @@ function micChunk(e){
     if(rms>thr)V.pk=Math.max(rms,(V.pk||0)*0.998);else V.pk=(V.pk||0)*0.9995;
     thr=Math.max(thr,(V.pk||0)*isoL().near);
   }
+  /* كاتم الصدى: وقت ما صوت الناس الثانيين يطلع من سماعتك، المايك يلقطه ويرجّعه لهم (خصوصًا الأندرويد على المكبر لأن كاتم الصدى حق المتصفح طافي فيه).
+     مع الدول البعيدة الصدى يرجع متأخر ويدور بين الجوالين ويكبر لين يصير تشويش عالي. الحين: وقت ما فيه صوت جاي، ما ينرسل إلا صوت أقوى من الصدى بوضوح */
+  const nk=ANDROID&&V.spk,ct=V.ctx.currentTime,farNow=V.far.some(x=>ct>=x[0]-0.05&&ct<=x[1]+(nk?0.6:0.5));
+  if(farNow){
+    V.ech=rms<V.ech?V.ech*.6+rms*.4:V.ech*.92+rms*.08; // مستوى الصدى (ينزل بسرعة ويطلع ببطء)
+    thr=Math.max(thr,V.ech*(nk?2.5:2),V.own*(nk?.35:.2));
+  }else if(rms>thr)V.own=Math.max(rms,V.own*.998);else V.own*=.9995; // قوة صوتك أنت (نتعلمها وقت ما فيه صوت جاي)
   let out2=out;
   if(rms>thr){
     if(V.hang===0)V.reEnc=true;
     if(V.hang===0&&V.pre&&V.pre.length){out2=V.pre.concat(out)} // بداية الكلام: نرسل معها المقطع اللي قبلها عشان أول الكلمة ما تنقص
-    V.pre=null;V.hang=V.iso?6:10;C.talk[C.me]=performance.now()}
+    V.pre=null;V.hang=farNow?3:V.iso?6:10;C.talk[C.me]=performance.now()}
   else if(V.hang>0){V.hang--;if(V.iso){const g=Math.min(1,(rms/thr)*(rms/thr));for(let i=0;i<out.length;i++)out[i]*=g}}
   else{const p=Array.from(out),F=Math.min(p.length,96);for(let i=0;i<F;i++)p[i]*=i/F;V.pre=p;return} // ما نرسل وقت السكوت، بس نحفظ آخر مقطع
   out=out2;
@@ -1019,7 +1028,7 @@ function hostVoice(from,d){
 function voicePlay(d){
   if(!d||!d.f||d.f===C.me||d.f===Net.myId)return;
   const key=d.s?d.f+'#s':d.f; // صوت العرض له مخزن ومشغّل خاص، منفصل عن مايك نفس الشخص
-  const last=V.seqs[key];if(last!=null&&d.n<=last)return;V.seqs[key]=d.n; // بدون تكرار (لو وصل من الطريقين)
+  const last=V.seqs[key];if(last!=null&&d.n<=last)return;const gap=last!=null&&d.n>last+1;V.seqs[key]=d.n; // gap = فيه مقطع ضاع بالطريق // بدون تكرار (لو وصل من الطريقين)
   if(!d.s)C.talk[d.f]=performance.now();
   if((d.c==='o'&&Array.isArray(d.o)&&d.o.length>=6)||(d.c!=='o'&&d.r===8000))(V.ws||(V.ws={}))[key]=performance.now(); // رسائل كبيرة = نت المتكلم ضعيف
   const ctx=voiceCtx();if(!ctx)return;
@@ -1028,31 +1037,33 @@ function voicePlay(d){
     let dec=V.dec[key];
     if(!dec||dec.state==='closed'){
       const from=key;
-      try{dec=V.dec[from]=new AudioDecoder({output:ad=>{try{
+      V.dq[from]=[];
+      try{dec=V.dec[from]=new AudioDecoder({output:ad=>{const sf=!!(V.dq[from]||[]).shift();try{
           const n=ad.numberOfFrames,sz=ad.allocationSize({planeIndex:0});let pcm;
           if(String(ad.format).startsWith('s16')){const i16=new Int16Array(sz/2);ad.copyTo(i16,{planeIndex:0});pcm=new Float32Array(n);for(let i=0;i<n;i++)pcm[i]=i16[i]/32768}
           else{const f=new Float32Array(sz/4);ad.copyTo(f,{planeIndex:0});pcm=f.length===n?f:f.subarray(0,n)}
-          playPcm(from,pcm,ad.sampleRate);}catch(e){}ad.close()},
+          playPcm(from,pcm,ad.sampleRate,sf);}catch(e){}ad.close()},
         error:()=>{V.dec[from]=null}});
         dec.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1});}catch(e){V.dec[key]=null;return}
     }
-    for(const b of d.o){try{const t=(V.dts[key]=(V.dts[key]||0)+40000);dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
+    let first=true;for(const b of d.o){try{const t=(V.dts[key]=(V.dts[key]||0)+40000);(V.dq[key]||(V.dq[key]=[])).push(gap&&first);first=false;dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
     return;
   }
   if(typeof d.a!=='string')return;
   let bin;try{bin=atob(d.a)}catch(e){return}
   const n=bin.length;if(!n)return;
   const pcm=new Float32Array(n);for(let i=0;i<n;i++)pcm[i]=mulawDec(bin.charCodeAt(i));
-  playPcm(key,pcm,d.r===16000?16000:8000);
+  playPcm(key,pcm,d.r===16000?16000:8000,gap);
 }
 /* تشغيل مقطع صوت بمخزن ذكي لكل متكلم (منقول من اللعبة) */
-function playPcm(from,pcm,rate){
+function playPcm(from,pcm,rate,soft){
   const ctx=V.ctx;if(!ctx||!pcm.length)return;
   const n=pcm.length,sr=ctx.sampleRate,k=sr/rate,len=Math.max(1,Math.floor(n*k));
   const ab=ctx.createBuffer(1,len,sr),ch=ab.getChannelData(0);
-  for(let j=0;j<len;j++){const x=j/k,i=Math.floor(x),f=x-i,a=pcm[i],b=i+1<n?pcm[i+1]:a;ch[j]=a+(b-a)*f}
+  for(let j=0;j<len;j++){const x=j/k,i=Math.floor(x),f=x-i,a=pcm[i],b=i+1<n?pcm[i+1]:a,y=a+(b-a)*f;ch[j]=y>1?1:y<-1?-1:y} // نقص أي قيمة فوق الحد (تمنع الطقطقة)
   const now=ctx.currentTime,prev=V.next[from]||0;let dl=V.dl[from]||0.1,t=prev;
   const wk=voiceWeak(from,now); // نت المتكلم (أو نتك) ضعيف جدًا ويتقطع؟
+  let fresh=false;
   if(t<now+0.01){
     if(prev&&now-prev<(wk?2:0.8)){ // وصل متأخر وسط الكلام: نكبّر المخزن على قد التأخير اللي صار فعلًا (مو خطوة صغيرة كل مرة)
       const late=now-prev,G=V.gap||(V.gap={});G[from]=(G[from]||[]).filter(x=>now-x<20).concat(now);
@@ -1060,12 +1071,21 @@ function playPcm(from,pcm,rate){
       dl=wk?Math.min(3,Math.max(dl+0.25,dl*1.5,late*2)):Math.min(0.5,Math.max(dl+0.06,late*1.5+0.05));
     }
     if(wk)dl=Math.max(dl,1);else if(dl>0.5)dl=0.5; // النت الضعيف: نجمّع الكلام ثانية أو أكثر (لين 3 ثواني) ونشغله قطعة وحدة بدون تقطيع
-    t=now+dl;const F=Math.min(len,96);for(let j=0;j<F;j++)ch[j]*=j/F; // بداية ناعمة بدون طقّة
+    t=now+dl;fresh=true;const F=Math.min(len,96);for(let j=0;j<F;j++)ch[j]*=j/F; // بداية ناعمة بدون طقّة
   }else if(t>now+dl+(wk?2.5:0.7))return; // تأخر زايد جدًا: نتخطى عشان نلحق الكلام (صار نادر: السكوت بين الكلام يرجّع المخزن لحاله)
   else dl=Math.max(wk?0.8:0.1,dl-0.001); // الشبكة مستقرة: نقلل التأخير ببطء عشان ما يرجع التقطيع على طول
   V.dl[from]=dl;
-  const src=ctx.createBufferSource();src.buffer=ab;src.connect(V.out);
-  src.start(t);V.next[from]=t+ab.duration;
+  /* كل مقطع ينتهي بتخفيت ناعم (6ms)، ونلغيه لو وصل اللي بعده على الوقت. كذا لو الصوت تقطّع (نت بعيد) ما تطلع طقّة،
+     ولو ضاع مقطع بالطريق (soft) نخلي التخفيت ونبدأ اللي بعده بنعومة بدل ما يلزقون ببعض بصوت خشن */
+  const FO=0.006,end=t+ab.duration,pg=V.pg[from];let cut=false;
+  if(!fresh&&!soft&&pg&&Math.abs(pg.end-t)<0.003&&now<pg.end-FO-0.02){try{pg.g.gain.cancelScheduledValues(pg.end-FO-0.001);cut=true}catch(e){}}
+  if(!fresh&&!cut){const F=Math.min(len,96);for(let j=0;j<F;j++)ch[j]*=j/F}
+  const g=ctx.createGain();if(ab.duration>FO*3){g.gain.setValueAtTime(1,end-FO);g.gain.linearRampToValueAtTime(0,end)}
+  const src=ctx.createBufferSource();src.buffer=ab;src.connect(g);g.connect(rate<=8000&&V.lp8?V.lp8:V.out);
+  src.start(t);V.next[from]=end;V.pg[from]={g,end};
+  const fr=V.far,L=fr[fr.length-1]; // نسجّل وقت تشغيل الصوت الجاي عشان كاتم الصدى
+  if(L&&t>=L[0]&&t<=L[1]+0.05){if(end>L[1])L[1]=end}else fr.push([t,end]);
+  while(fr.length&&fr[0][1]<now-3)fr.shift();if(fr.length>40)fr.splice(0,fr.length-40);
 }
 
 /* النت الضعيف: 3 تقطيعات خلال 20 ثانية عند متكلم = نكبّر المخزن ونجمّع كلامه */
@@ -1073,9 +1093,9 @@ function voiceWeak(from,now){
   const w=V.ws&&V.ws[from];if(w&&performance.now()-w<15000)return true; // المتكلم نفسه نته ضعيف (رسائله كبيرة): نجمّع كلامه من أول لحظة بدون ما ننتظر التقطيع
   const g=V.gap&&V.gap[from];return !!(g&&g.filter(x=>now-x<20).length>=3)}
 /* نتك أنت ضعيف (التأخير للمضيف أكثر من 400ms): نجمع فريمات أكثر بالرسالة ونرسلها بالقناة المضمونة */
-const weakNet = ()=>!Net.isHost&&C.rtt!=null&&C.rtt>300;
+const weakNet = ()=>!Net.isHost&&!!C.weak; // يدخل فوق 300ms (منعّم) ويطلع تحت 220ms
 /* فريمات Opus بالرسالة: عادي 3 (120ms)، ضعيف 6، بنق عالي جدًا (فوق 700ms مثل 1000) 10 = 0.4 ثانية بالرسالة */
-const opusPer = ()=>(!Net.isHost&&C.rtt!=null&&C.rtt>700)?10:weakNet()?6:3;
+const opusPer = ()=>(!Net.isHost&&C.rttS!=null&&C.rttS>700)?10:weakNet()?6:3;
 
 /* ================= 8) العرض (شاشة / كاميرا / صورة) ==================
    نلقط الصورة ونرسل JPEG أو WebP بس لو تغيّر شي (وكل 4 ثواني صورة تأكيد).
@@ -1488,7 +1508,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
-  h+='<div class="hint" style="opacity:.6">النسخة 10 · اختيار المكبر أو سماعة الأذن بالجوال</div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 11 · صوت بدون تشويش مع الدول البعيدة</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
