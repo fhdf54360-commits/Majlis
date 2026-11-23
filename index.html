@@ -777,7 +777,10 @@ function denoise(x,rate){
       nz[k]=ps[k]<nz[k]?nz[k]*.9+ps[k]*.1:nz[k]*1.002+1e-12; // نتابع أقل مستوى = صوت الخلفية
       let G=1-IL.f*nz[k]/ps[k];if(G<IL.g)G=IL.g;         // نطرح الخلفية حسب المستوى المختار (16 لين 50 ديسيبل) والكلام يبقى زي ما هو
       g[k]=G>g[k]?G*.7+g[k]*.3:G*.4+g[k]*.6;
-      re[k]*=g[k];im[k]*=g[k];if(k>0&&k<N/2){re[N-k]*=g[k];im[N-k]*=g[k]}
+    }
+    for(let k=0;k<K;k++){ // نعّم الطرح بين الترددات المتجاورة: يشيل الرنة المعدنية (الصوت الآلي)
+      const gs=k>0&&k<K-1?(g[k-1]+2*g[k]+g[k+1])*.25:g[k];
+      re[k]*=gs;im[k]*=gs;if(k>0&&k<N/2){re[N-k]*=gs;im[N-k]*=gs}
     }
     fft(re,im,true);
     for(let i=0;i<H;i++)out.push(DN.ola[i]+re[i]/N*w[i]);
@@ -854,7 +857,7 @@ async function micToggle(){
   V.flt=[hp,lp];
   V.src.connect(hp);hp.connect(lp);lp.connect(V.proc);V.proc.connect(V.mute);V.mute.connect(ctx.destination);
   voiceWake();setTimeout(voiceReroute,300);setTimeout(voiceWake,1200); // الآيفون يغيّر مخرج الصوت بعد تشغيل المايك
-  V.tail=new Float32Array(0);V.pos=0;V.hang=0;DN.rate=0;V.proc.onaudioprocess=micChunk;V.on=true;
+  V.tail=new Float32Array(0);V.pos=0;V.hang=0;V.pre=null;V.mb=[];DN.rate=0;V.proc.onaudioprocess=micChunk;V.on=true;
   sendHost({t:'ms',d:{on:true}});
   render();toast('🎙️ المايك شغال');
 }
@@ -875,7 +878,7 @@ function micConstraints(){
   try{if(V.iso&&navigator.mediaDevices.getSupportedConstraints().voiceIsolation)c.voiceIsolation=true}catch(e){}
   return c;
 }
-const micLp = ()=>V.iso?ISO.lp[1]:(useOpus()?11000:ISO.lp[0]);
+const micLp = ()=>(!useOpus()&&weakNet())?3400:V.iso?ISO.lp[1]:(useOpus()?11000:ISO.lp[0]);
 async function isoToggle(){
   V.iso=!V.iso;LS.set('mj_iso',V.iso);DN.rate=0;V.pk=0;
   const tr=V.stream&&V.stream.getAudioTracks()[0];
@@ -903,24 +906,34 @@ async function isoToggle(){
 function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};Object.values(V.dec).forEach(d=>{try{d.close()}catch(e){}});V.dec={};V.dts={}}
 /* مشفّر Opus */
 function opusEnc(){
-  if(V.enc&&V.enc.state==='configured')return V.enc;
+  const br=weakNet()?12000:16000;
+  if(V.enc&&V.enc.state==='configured'){ // بداية كلام جديد والنت تغيّر: نبدّل السرعة (بس إذا ما فيه شي معلّق)
+    if(!(V.reEnc&&V.ebr!==br&&!V.ob.length&&V.enc.encodeQueueSize===0)){V.reEnc=false;return V.enc}
+    try{V.enc.close()}catch(e){}V.enc=null;
+  }
+  V.reEnc=false;
   try{
-    V.enc=new AudioEncoder({output:ch=>{const u=new Uint8Array(ch.byteLength);ch.copyTo(u);V.ob.push(u);if(V.ob.length>=(weakNet()?6:3))opusFlush()},
+    V.enc=new AudioEncoder({output:ch=>{const u=new Uint8Array(ch.byteLength);ch.copyTo(u);V.ob.push(u);if(V.ob.length>=opusPer())opusFlush()},
       error:()=>{V.enc=null;CAP.o=false;if(C.joined)sendHost({t:'cp',d:{o:false}})}}); // لو تعطّل: نرجع للطريقة القديمة
-    V.enc.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1,bitrate:12000,opus:{frameDuration:40000,useinbandfec:true,packetlossperc:10}});
+    // FEC طافي: المتصفح ما يقدر يستخدمه بالاستقبال، وكان ياكل من جودة الصوت. 16kbps للنت العادي و12 للنت الضعيف
+    const oc={codec:'opus',sampleRate:OSR,numberOfChannels:1,bitrate:br};V.ebr=br;
+    try{V.enc.configure(Object.assign({},oc,{opus:{frameDuration:40000,complexity:10,signal:'voice',application:'voip',useinbandfec:false,packetlossperc:0}}))}
+    catch(e){V.enc.configure(Object.assign({},oc,{opus:{frameDuration:40000}}))}
     V.ets=0;return V.enc;
   }catch(e){V.enc=null;CAP.o=false;if(C.joined)sendHost({t:'cp',d:{o:false}});return null}
 }
 function opusFlush(){if(!V.ob.length)return;const o=V.ob.map(u8b64);V.ob=[];voiceOut({n:V.seq++,c:'o',o})}
 function micChunk(e){
   if(!V.on||!C.joined)return;
-  const opus=useOpus(),rate=opus?OSR:VR;
+  const opus=useOpus(),rate=opus?OSR:(weakNet()?8000:VR); // μ-law والنت ضعيف: 8kHz (نص الحجم)
   if(V.flt){const f=micLp();if(V.flt[1].frequency.value!==f)V.flt[1].frequency.value=f}
   const inp=e.inputBuffer.getChannelData(0),buf=new Float32Array(V.tail.length+inp.length);buf.set(V.tail);buf.set(inp,V.tail.length);
   const r=V.ctx.sampleRate/rate,raw=[];let pos=V.pos,sq=0;
-  while(pos+r<=buf.length){const a=Math.floor(pos),b=Math.max(a+1,Math.floor(pos+r));let s=0;for(let i=a;i<b;i++)s+=buf[i];s/=(b-a);raw.push(s);pos+=r}
+  while(pos+r<=buf.length){ // متوسط دقيق بأوزان كسرية: بدون اهتزاز بالتوقيت (كان يشوّه الصوت ويطلّعه مكسّر خصوصًا بالأجهزة اللي ترددها 44.1kHz)
+    const e=pos+r;let s=0;for(let i=Math.floor(pos);i<e;i++){const lo=i>pos?i:pos,hi=i+1<e?i+1:e;s+=buf[i]*(hi-lo)}
+    raw.push(s/r);pos=e}
   const cut=Math.floor(pos);V.tail=buf.slice(cut);V.pos=pos-cut;
-  const out=V.iso?Array.from(denoise(Float32Array.from(raw),rate)):raw; // عزل الصوت: نشيل الضوضاء الثابتة (مكيف، مروحة، زحمة)
+  let out=V.iso?Array.from(denoise(Float32Array.from(raw),rate)):raw; // عزل الصوت: نشيل الضوضاء الثابتة (مكيف، مروحة، زحمة)
   if(!out.length)return;
   for(let i=0;i<out.length;i++)sq+=out[i]*out[i];
   const rms=Math.sqrt(sq/out.length);let thr=V.iso?ISO.gate[1]:ISO.gate[0];
@@ -928,9 +941,14 @@ function micChunk(e){
     if(rms>thr)V.pk=Math.max(rms,(V.pk||0)*0.998);else V.pk=(V.pk||0)*0.9995;
     thr=Math.max(thr,(V.pk||0)*isoL().near);
   }
-  if(rms>thr){V.hang=V.iso?6:10;C.talk[C.me]=performance.now()}
+  let out2=out;
+  if(rms>thr){
+    if(V.hang===0)V.reEnc=true;
+    if(V.hang===0&&V.pre&&V.pre.length){out2=V.pre.concat(out)} // بداية الكلام: نرسل معها المقطع اللي قبلها عشان أول الكلمة ما تنقص
+    V.pre=null;V.hang=V.iso?6:10;C.talk[C.me]=performance.now()}
   else if(V.hang>0){V.hang--;if(V.iso){const g=Math.min(1,(rms/thr)*(rms/thr));for(let i=0;i<out.length;i++)out[i]*=g}}
-  else return; // ما نرسل وقت السكوت
+  else{const p=Array.from(out),F=Math.min(p.length,96);for(let i=0;i<F;i++)p[i]*=i/F;V.pre=p;return} // ما نرسل وقت السكوت، بس نحفظ آخر مقطع
+  out=out2;
   if(V.hang===0){const L=Math.min(out.length,96);for(let i=0;i<L;i++)out[out.length-1-i]*=i/L} // تخفيت آخر مقطع عشان ما تطلع طقّة
   if(opus){
     const enc=opusEnc();
@@ -943,6 +961,11 @@ function micChunk(e){
     }
   }
   const u8=new Uint8Array(out.length);for(let i=0;i<out.length;i++)u8[i]=mulawEnc(out[i]);
+  if(rate===8000||(V.mb&&V.mb.length)){ // النت ضعيف: نجمع 0.3 ثانية بالرسالة (رسائل أقل)
+    if(rate!==8000){voiceOut({n:V.seq++,a:u8b64(Uint8Array.from(V.mb)),r:8000});V.mb=[]}
+    else{const b=V.mb||(V.mb=[]);for(let i=0;i<u8.length;i++)b.push(u8[i]);
+      if(b.length>=2400||V.hang===0){V.mb=[];voiceOut({n:V.seq++,a:u8b64(Uint8Array.from(b)),r:8000})}return}
+  }
   voiceOut({n:V.seq++,a:u8b64(u8),r:VR});
 }
 function voiceOut(d){
@@ -959,6 +982,7 @@ function hostVoice(from,d){
   let v;
   if(d.c==='o'){if(!Array.isArray(d.o)||!d.o.length||d.o.length>12||d.o.some(x=>typeof x!=='string'||x.length>800))return;v={f:from,n:d.n,c:'o',o:d.o}}
   else{if(typeof d.a!=='string'||d.a.length>6000)return;v={f:from,n:d.n,a:d.a,r:d.r===16000?16000:8000}}
+  if(d.s)v.s=1; // صوت العرض (فيديو أو شاشة)
   const s=JSON.stringify({t:'vc',d:v});let viaMq=false;
   H.players.forEach(p=>{
     if(!p.on||p.id===from||p.id===Net.myId)return;
@@ -971,30 +995,32 @@ function hostVoice(from,d){
 }
 function voicePlay(d){
   if(!d||!d.f||d.f===C.me||d.f===Net.myId)return;
-  const last=V.seqs[d.f];if(last!=null&&d.n<=last)return;V.seqs[d.f]=d.n; // بدون تكرار (لو وصل من الطريقين)
-  C.talk[d.f]=performance.now();
+  const key=d.s?d.f+'#s':d.f; // صوت العرض له مخزن ومشغّل خاص، منفصل عن مايك نفس الشخص
+  const last=V.seqs[key];if(last!=null&&d.n<=last)return;V.seqs[key]=d.n; // بدون تكرار (لو وصل من الطريقين)
+  if(!d.s)C.talk[d.f]=performance.now();
+  if((d.c==='o'&&Array.isArray(d.o)&&d.o.length>=6)||(d.c!=='o'&&d.r===8000))(V.ws||(V.ws={}))[key]=performance.now(); // رسائل كبيرة = نت المتكلم ضعيف
   const ctx=voiceCtx();if(!ctx)return;
   if(d.c==='o'){
     if(!Array.isArray(d.o)||!window.AudioDecoder)return;
-    let dec=V.dec[d.f];
+    let dec=V.dec[key];
     if(!dec||dec.state==='closed'){
-      const from=d.f;
+      const from=key;
       try{dec=V.dec[from]=new AudioDecoder({output:ad=>{try{
           const n=ad.numberOfFrames,sz=ad.allocationSize({planeIndex:0});let pcm;
           if(String(ad.format).startsWith('s16')){const i16=new Int16Array(sz/2);ad.copyTo(i16,{planeIndex:0});pcm=new Float32Array(n);for(let i=0;i<n;i++)pcm[i]=i16[i]/32768}
           else{const f=new Float32Array(sz/4);ad.copyTo(f,{planeIndex:0});pcm=f.length===n?f:f.subarray(0,n)}
           playPcm(from,pcm,ad.sampleRate);}catch(e){}ad.close()},
         error:()=>{V.dec[from]=null}});
-        dec.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1});}catch(e){V.dec[d.f]=null;return}
+        dec.configure({codec:'opus',sampleRate:OSR,numberOfChannels:1});}catch(e){V.dec[key]=null;return}
     }
-    for(const b of d.o){try{const t=(V.dts[d.f]=(V.dts[d.f]||0)+40000);dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
+    for(const b of d.o){try{const t=(V.dts[key]=(V.dts[key]||0)+40000);dec.decode(new EncodedAudioChunk({type:'key',timestamp:t,data:b64u8(b)}))}catch(e){}}
     return;
   }
   if(typeof d.a!=='string')return;
   let bin;try{bin=atob(d.a)}catch(e){return}
   const n=bin.length;if(!n)return;
   const pcm=new Float32Array(n);for(let i=0;i<n;i++)pcm[i]=mulawDec(bin.charCodeAt(i));
-  playPcm(d.f,pcm,d.r===16000?16000:8000);
+  playPcm(key,pcm,d.r===16000?16000:8000);
 }
 /* تشغيل مقطع صوت بمخزن ذكي لكل متكلم (منقول من اللعبة) */
 function playPcm(from,pcm,rate){
@@ -1005,23 +1031,28 @@ function playPcm(from,pcm,rate){
   const now=ctx.currentTime,prev=V.next[from]||0;let dl=V.dl[from]||0.1,t=prev;
   const wk=voiceWeak(from,now); // نت المتكلم (أو نتك) ضعيف جدًا ويتقطع؟
   if(t<now+0.01){
-    if(prev&&now-prev<(wk?1.5:0.35)){ // وصل متأخر وسط الكلام: نكبّر المخزن عشان ما يتقطع
-      const G=V.gap||(V.gap={});G[from]=(G[from]||[]).filter(x=>now-x<20).concat(now);
-      dl=wk?Math.min(3,dl+Math.max(0.25,dl*0.5)):Math.min(0.35,dl+0.05);
+    if(prev&&now-prev<(wk?2:0.8)){ // وصل متأخر وسط الكلام: نكبّر المخزن على قد التأخير اللي صار فعلًا (مو خطوة صغيرة كل مرة)
+      const late=now-prev,G=V.gap||(V.gap={});G[from]=(G[from]||[]).filter(x=>now-x<20).concat(now);
+      if(late>0.5)G[from].push(now); // تقطيعة طويلة تنحسب مرتين: يدخل وضع التجميع أسرع
+      dl=wk?Math.min(3,Math.max(dl+0.25,dl*1.5,late*2)):Math.min(0.5,Math.max(dl+0.06,late*1.5+0.05));
     }
-    if(wk)dl=Math.max(dl,1);else if(dl>0.35)dl=0.35; // النت الضعيف: نجمّع الكلام ثانية أو أكثر (لين 3 ثواني) ونشغله قطعة وحدة بدون تقطيع
+    if(wk)dl=Math.max(dl,1);else if(dl>0.5)dl=0.5; // النت الضعيف: نجمّع الكلام ثانية أو أكثر (لين 3 ثواني) ونشغله قطعة وحدة بدون تقطيع
     t=now+dl;const F=Math.min(len,96);for(let j=0;j<F;j++)ch[j]*=j/F; // بداية ناعمة بدون طقّة
-  }else if(t>now+dl+(wk?1.5:0.25))return; // تأخر زايد: نتخطى هالمقطع عشان نلحق الكلام بدون ما يتداخل الصوت
-  else dl=Math.max(wk?0.6:0.08,dl-0.003); // الشبكة مستقرة: نقلل التأخير شوي شوي
+  }else if(t>now+dl+(wk?2.5:0.7))return; // تأخر زايد جدًا: نتخطى عشان نلحق الكلام (صار نادر: السكوت بين الكلام يرجّع المخزن لحاله)
+  else dl=Math.max(wk?0.8:0.1,dl-0.001); // الشبكة مستقرة: نقلل التأخير ببطء عشان ما يرجع التقطيع على طول
   V.dl[from]=dl;
   const src=ctx.createBufferSource();src.buffer=ab;src.connect(V.out);
   src.start(t);V.next[from]=t+ab.duration;
 }
 
 /* النت الضعيف: 3 تقطيعات خلال 20 ثانية عند متكلم = نكبّر المخزن ونجمّع كلامه */
-function voiceWeak(from,now){const g=V.gap&&V.gap[from];return !!(g&&g.filter(x=>now-x<20).length>=3)}
+function voiceWeak(from,now){
+  const w=V.ws&&V.ws[from];if(w&&performance.now()-w<15000)return true; // المتكلم نفسه نته ضعيف (رسائله كبيرة): نجمّع كلامه من أول لحظة بدون ما ننتظر التقطيع
+  const g=V.gap&&V.gap[from];return !!(g&&g.filter(x=>now-x<20).length>=3)}
 /* نتك أنت ضعيف (التأخير للمضيف أكثر من 400ms): نجمع فريمات أكثر بالرسالة ونرسلها بالقناة المضمونة */
-const weakNet = ()=>!Net.isHost&&C.rtt!=null&&C.rtt>400;
+const weakNet = ()=>!Net.isHost&&C.rtt!=null&&C.rtt>300;
+/* فريمات Opus بالرسالة: عادي 3 (120ms)، ضعيف 6، بنق عالي جدًا (فوق 700ms مثل 1000) 10 = 0.4 ثانية بالرسالة */
+const opusPer = ()=>(!Net.isHost&&C.rtt!=null&&C.rtt>700)?10:weakNet()?6:3;
 
 /* ================= 8) العرض (شاشة / كاميرا / صورة) ==================
    نلقط الصورة ونرسل JPEG أو WebP بس لو تغيّر شي (وكل 4 ثواني صورة تأكيد).
@@ -1038,7 +1069,7 @@ function openSheet(){
   const sh=C.room&&C.room.sharer;if(sh&&sh!==C.me){toast(pname(sh)+' يعرض الحين، انتظره يخلص');return}
   const o=(k,i,t,d)=>'<button class="sh-o" data-a="src" data-v="'+k+'"><span class="i">'+i+'</span><span><b>'+t+'</b>'+(d?'<small>'+d+'</small>':'')+'</span></button>';
   let h='<div class="sh-card"><div class="sh-t">وش تبي تعرض؟</div>';
-  if(CAN_SCREEN)h+=o('screen','🖥️','شاشتك','الشاشة كاملة أو نافذة أو تبويب');
+  if(CAN_SCREEN)h+=o('screen','🖥️','شاشتك','الشاشة أو نافذة أو تبويب — علّم «مشاركة الصوت» عشان يطلع الصوت');
   if(HAS_CAM){if(MOBILE){h+=o('camb','📷','الكاميرا الخلفية','وجّهها على اللي تبي تعرضه');h+=o('camf','🤳','الكاميرا الأمامية','')}else h+=o('camf','📷','الكاميرا','')}
   h+=o('vid','🎬','تسجيل شاشة (فيديو)',MOBILE?'سجّل شاشتك من مسجّل الجوال، واختر الفيديو هنا':'أي فيديو من جهازك');
   h+=o('img','🖼️','صورة أو لقطة شاشة','من الصور أو الملفات');
@@ -1074,7 +1105,7 @@ async function shareStart(kind,arg){
   try{
     if(kind==='img')img=await loadImg(arg);
     else if(kind==='vid')vurl=URL.createObjectURL(arg);
-    else if(kind==='screen')st=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:10,max:15}},audio:false});
+    else if(kind==='screen')st=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:10,max:15}},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},systemAudio:'include'}).catch(e=>{if(e&&e.name==='TypeError')return navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:10,max:15}},audio:false});throw e}); // مع صوت الشاشة لو المتصفح يدعمه
     else st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:arg||'environment'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:15}},audio:false});
   }catch(e){
     S.busy=false;
@@ -1091,6 +1122,7 @@ async function shareStart(kind,arg){
     const v=S.video=document.createElement('video');v.muted=true;v.playsInline=true;v.setAttribute('playsinline','');S.vurl=vurl;
     v.style.cssText='position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;left:0;top:0';
     document.body.appendChild(v);v.src=vurl;v.onended=()=>render();v.play().catch(()=>{});
+    if(shareAudioStart(null,v))v.play().catch(()=>{toast('▶️ اضغط «تشغيل» عشان يشتغل الفيديو بالصوت')}); // صوت الفيديو ينرسل للكل
   }
   if(st){
     try{S.ic=(window.ImageCapture&&S.track)?new ImageCapture(S.track):null}catch(e){S.ic=null}
@@ -1099,6 +1131,7 @@ async function shareStart(kind,arg){
     document.body.appendChild(v);v.srcObject=st;v.play().catch(()=>{});
     if(S.track)S.track.onended=()=>{if(S.on&&S.stream===st){shareStop(true);render();toast('⏹️ انتهى العرض')}};
     frameReader(S.track);
+    if(kind==='screen'&&!(st.getAudioTracks().length&&shareAudioStart(st,null)))toast('🔇 الشاشة بدون صوت — عشان الصوت: اختر «تبويب» أو «الشاشة كاملة» وعلّم «مشاركة الصوت»');
   }
   S.cv=S.cv||document.createElement('canvas');S.cx=S.cx||S.cv.getContext('2d');
   if(!S.sc){S.sc=document.createElement('canvas');S.sc.width=64;S.sc.height=36;S.sx=S.sc.getContext('2d',{willReadFrequently:true})}
@@ -1110,12 +1143,65 @@ function shareStop(notify){
   const was=S.on;S.on=false;
   if(S.stream)S.stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});
   if(S.video){try{S.video.pause();S.video.srcObject=null;S.video.removeAttribute('src');S.video.remove()}catch(e){}}
+  shareAudioStop();
   if(S.vurl){const u=S.vurl;S.vurl=null;setTimeout(()=>URL.revokeObjectURL(u),500)}
   if(S.img&&S.img.close){try{S.img.close()}catch(e){}}
   S.stream=S.track=S.ic=S.video=S.img=null;S.busy=false;
   if(S.enc){try{S.enc.close()}catch(e){}S.enc=null}S.vc=null;
   if(S.reader){try{S.reader.cancel()}catch(e){}S.reader=null}if(S.latest){try{S.latest.close()}catch(e){}S.latest=null}
   if(was&&notify&&C.joined)sendHost({t:'ss',d:{on:false}});
+}
+/* صوت العرض: صوت الفيديو (جوال وكمبيوتر) أو صوت الشاشة (كمبيوتر) ينرسل مثل المايك برسالة vc فيها s:1،
+   بمشفّر خاص بجودة أعلى للموسيقى، وبدون بوابة سكوت أو عزل (عشان ما يتقطع). عنده AudioContext خاص عشان إصلاحات الآيفون للمايك ما تقطعه */
+const SA={ctx:null,src:null,lp:null,proc:null,z:null,mon:null,enc:null,ob:[],ets:0,seq:Date.now(),tail:new Float32Array(0),pos:0};
+function shareAudioStart(stream,video){
+  shareAudioStop();
+  try{
+    const ctx=SA.ctx||(SA.ctx=new (window.AudioContext||window.webkitAudioContext)());
+    if(ctx.state!=='running')ctx.resume().catch(()=>{});
+    let src;
+    if(stream){const tr=stream.getAudioTracks()[0];if(!tr)return false;src=ctx.createMediaStreamSource(new MediaStream([tr]))}
+    else if(video){src=ctx.createMediaElementSource(video);video.muted=false;SA.mon=ctx.createGain();SA.mon.gain.value=1;src.connect(SA.mon);SA.mon.connect(ctx.destination)} // الفيديو: تسمعه أنت بعد
+    else return false;
+    const lp=ctx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=11000;
+    const proc=ctx.createScriptProcessor(2048,1,1),z=ctx.createGain();z.gain.value=0;
+    src.connect(lp);lp.connect(proc);proc.connect(z);z.connect(ctx.destination);
+    Object.assign(SA,{src,lp,proc,z,tail:new Float32Array(0),pos:0,ob:[]});
+    proc.onaudioprocess=shareAudioChunk;return true;
+  }catch(e){shareAudioStop();return false}
+}
+function shareAudioStop(){
+  try{SA.proc&&(SA.proc.onaudioprocess=null,SA.proc.disconnect());SA.src&&SA.src.disconnect();SA.lp&&SA.lp.disconnect();SA.mon&&SA.mon.disconnect();SA.z&&SA.z.disconnect()}catch(e){}
+  SA.src=SA.lp=SA.proc=SA.z=SA.mon=null;
+  if(SA.enc){try{SA.enc.close()}catch(e){}SA.enc=null}SA.ob=[];
+}
+function shareAudioOut(d){d.s=1;voiceOut(d)}
+function saEnc(){
+  if(SA.enc&&SA.enc.state==='configured')return SA.enc;
+  try{
+    SA.enc=new AudioEncoder({output:ch=>{const u=new Uint8Array(ch.byteLength);ch.copyTo(u);SA.ob.push(u);if(SA.ob.length>=opusPer()){const o=SA.ob.map(u8b64);SA.ob=[];shareAudioOut({n:SA.seq++,c:'o',o})}},error:()=>{SA.enc=null}});
+    const oc={codec:'opus',sampleRate:OSR,numberOfChannels:1,bitrate:weakNet()?20000:32000};
+    try{SA.enc.configure(Object.assign({},oc,{opus:{frameDuration:40000,complexity:10,signal:'music',application:'audio',useinbandfec:false,packetlossperc:0}}))}
+    catch(e){SA.enc.configure(Object.assign({},oc,{opus:{frameDuration:40000}}))}
+    SA.ets=0;return SA.enc;
+  }catch(e){SA.enc=null;return null}
+}
+function shareAudioChunk(e){
+  if(!S.on||!C.joined||!C.room||C.room.sharer!==C.me)return;
+  if(S.kind==='vid'&&S.video&&S.video.paused)return;
+  const opus=useOpus(),rate=opus?OSR:8000;
+  if(SA.lp){const f=opus?11000:3400;if(SA.lp.frequency.value!==f)SA.lp.frequency.value=f}
+  const inp=e.inputBuffer.getChannelData(0),buf=new Float32Array(SA.tail.length+inp.length);buf.set(SA.tail);buf.set(inp,SA.tail.length);
+  const r=e.inputBuffer.sampleRate/rate,out=[];let pos=SA.pos,sq=0;
+  while(pos+r<=buf.length){const en=pos+r;let s=0;for(let i=Math.floor(pos);i<en;i++){const lo=i>pos?i:pos,hi=i+1<en?i+1:en;s+=buf[i]*(hi-lo)}out.push(s/r);pos=en}
+  const cut=Math.floor(pos);SA.tail=buf.slice(cut);SA.pos=pos-cut;
+  if(!out.length)return;
+  for(let i=0;i<out.length;i++)sq+=out[i]*out[i];
+  if(Math.sqrt(sq/out.length)<0.0002)return; // سكوت تام: ما نرسل شي (نوفر نت)
+  if(opus){const enc=saEnc();if(enc){try{const ad=new AudioData({format:'f32',sampleRate:OSR,numberOfFrames:out.length,numberOfChannels:1,timestamp:SA.ets,data:Float32Array.from(out)});
+    SA.ets+=Math.round(out.length/OSR*1e6);enc.encode(ad);ad.close()}catch(err){}return}}
+  const u8=new Uint8Array(out.length);for(let i=0;i<out.length;i++)u8[i]=mulawEnc(out[i]);
+  shareAudioOut({n:SA.seq++,a:u8b64(u8),r:8000});
 }
 async function shareTick(){
   if(!S.on||S.busy||!C.joined||!C.room||C.room.sharer!==C.me)return; // ننتظر المضيف يأكد إننا اللي نعرض
@@ -1379,7 +1465,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
-  h+='<div class="hint" style="opacity:.6">النسخة 7 · دردشة + صوت أثبت للنت الضعيف + نت أقل</div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 9 · صوت الفيديو وعرض الشاشة + صوت أنقى</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
@@ -1523,7 +1609,7 @@ $('#app').addEventListener('keydown',e=>{
 });
 /* تفعيل الصوت: داخل الغرفة بأي ضغطة، وبره بس من أزرار الدخول (عشان ما يوقف الأغاني في جوالك وأنت بالصفحة الرئيسية) */
 const VOICE_KEYS=['create','createp','joinlk','joincd','joinpin','joinroom'];
-const voiceTap=e=>{if(C.joined||V.ctx){const was=soundOk();voiceCtx();if(!was&&C.joined)setTimeout(()=>{if(soundOk())render()},250);return}const el=e.target&&e.target.closest&&e.target.closest('[data-a]');if(el&&VOICE_KEYS.includes(el.dataset.a))voiceCtx()};
+const voiceTap=e=>{if(SA.ctx&&SA.ctx.state!=='running')SA.ctx.resume().catch(()=>{});if(C.joined||V.ctx){const was=soundOk();voiceCtx();if(!was&&C.joined)setTimeout(()=>{if(soundOk())render()},250);return}const el=e.target&&e.target.closest&&e.target.closest('[data-a]');if(el&&VOICE_KEYS.includes(el.dataset.a))voiceCtx()};
 document.addEventListener('click',voiceTap,true);
 ['touchend','pointerup'].forEach(ev=>document.addEventListener(ev,voiceTap,{capture:true,passive:true})); // الآيفون يحتاج لمسة عشان يشغّل الصوت
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')voiceWake()});
