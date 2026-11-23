@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b1120">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <title>مجلس — اجتماعات أونلاين</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -71,8 +73,8 @@ button.chip{cursor:pointer}
 .soundbar{margin:12px 0}
 /* شاشة العرض */
 #stagebox.stage{position:relative;background:#000;border-radius:18px;overflow:hidden;border:1px solid var(--line);margin:12px 0;aspect-ratio:16/9;max-height:72vh;width:100%;display:flex;align-items:center;justify-content:center}
-#stagebox img{width:100%;height:100%;object-fit:contain;display:block;opacity:0}
-#stagebox img.show{opacity:1}
+#stagebox img,#stagebox canvas{width:100%;height:100%;object-fit:contain;display:none}
+#stagebox img.show,#stagebox canvas.show{display:block}
 #stagebox .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--mut);font-weight:600;text-align:center;padding:10px}
 #stagebox .ph .spin{margin:0 0 12px}
 #stagebox .lbl{position:absolute;top:10px;inset-inline-start:10px;background:rgba(0,0,0,.65);padding:4px 12px;border-radius:999px;font-size:13px;font-weight:800;max-width:calc(100% - 20px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -160,6 +162,16 @@ const LV = [
   {w:560, h:350,q:.36,g:2000},
 ];
 const LV_NAMES = ['عالية جدًا','عالية','متوسطة','منخفضة','منخفضة جدًا'];
+/* عرض الشاشة والكاميرا كفيديو حقيقي (أنعم وأخف بكثير من الصور): المقاس وعدد الإطارات والجودة لكل مستوى.
+   النت قوي = المستوى 0 (سلس)، ضعيف = ينزل لحاله ويقلل الإطارات والجودة */
+const VLV = [
+  {w:1280,h:720,fps:24,br:1200000},
+  {w:1280,h:720,fps:15,br:700000},
+  {w:960, h:540,fps:12,br:420000},
+  {w:854, h:480,fps:8, br:250000},
+  {w:640, h:360,fps:5, br:140000},
+];
+const VCODECS = ['vp8','avc1.42001f'];
 
 /* ================= 2) أدوات ================= */
 const $ = s=>document.querySelector(s);
@@ -381,7 +393,7 @@ async function createRoom(priv){
   if(!ok){Net.isHost=false;Net.key=null;toast('تعذّر الاتصال بالخوادم، جرّب مرة ثانية');goHome();return}
   Net.mq.subscribe(tp('/h'));
   Object.assign(H,{players:[],sharer:null,sk:'screen',lastFrame:null,fin:{},lastFid:0,skipRun:0,rj:{}});
-  H.players.push({id:Net.myId,name,on:true,seen:Date.now(),mic:false,direct:true,op:CAP.o});
+  H.players.push({id:Net.myId,name,on:true,seen:Date.now(),mic:false,direct:true,op:CAP.o,vd:CAP.vd.slice()});
   C.joined=true;C.me=Net.myId;C.screen=null;
   setUrlRoom();publishRoom();pushRoom();
   toast(priv?'🔒 الغرفة الخاصة جاهزة — أرسل الرابط':'✅ الغرفة جاهزة — أرسل الكود أو الرابط');
@@ -418,12 +430,15 @@ function hostWatch(){
 }
 /* الصوت بـ Opus (أخف وأوضح) لو كل الأجهزة تدعمه، وإلا بالطريقة القديمة μ-law */
 const roomCodec = ()=>H.players.every(p=>p.op)?'o':'m';
+const roomVd = ()=>VCODECS.filter(c=>H.players.every(p=>(p.vd||[]).includes(c))); // صيغ الفيديو اللي كل الأجهزة تقدر تشغلها
+const cleanVd = v=>Array.isArray(v)?v.filter(c=>VCODECS.includes(c)):[];
 function pubPlayers(){return H.players.map(p=>({id:p.id,name:p.name,mic:!!p.mic,host:p.id===Net.myId,direct:p.id===Net.myId||isDirect(p.id)}))}
-function roomMsg(){return{t:'room',d:{players:pubPlayers(),sharer:H.sharer,sk:H.sk,code:Net.code,hostId:Net.myId,b:Net.idx,priv:!!H.priv,pin:H.priv?Net.key:null,codec:roomCodec()}}}
+function roomMsg(){return{t:'room',d:{players:pubPlayers(),sharer:H.sharer,sk:H.sk,code:Net.code,hostId:Net.myId,b:Net.idx,priv:!!H.priv,pin:H.priv?Net.key:null,codec:roomCodec(),vd:roomVd()}}}
 function pushRoom(){broadcast(roomMsg());publishRoom()}
 function fullSync(id){
   sendTo(id,roomMsg());
   if(H.sharer&&H.lastFrame&&H.lastFrame.f!==id)sendFrameTo(id,H.lastFrame);
+  if(H.sharer&&H.sharer!==id)requestKey(H.sharer);
 }
 function othersMsg(exceptId,msg){H.players.forEach(p=>{if(p.on&&p.id!==exceptId)sendTo(p.id,msg)})}
 function hostHandle(id,m){
@@ -447,6 +462,7 @@ function hostHandle(id,m){
     case 'cp':if(p.op!==!!d.o){p.op=!!d.o;pushRoom()}return;
     case 'ss':return hostShare(id,!!d.on,d.k);
     case 'sf':return hostFrame(id,d);
+    case 'kq':if(H.sharer)requestKey(H.sharer);return;
   }
 }
 /* واحد انحذف (نام جواله مثلاً) ورجع يرسل: نطلب منه يدخل من جديد */
@@ -455,12 +471,13 @@ function onHello(id,d){
   const name=cleanName(d.name);
   const welcome={t:'welcome',d:{id,hostId:Net.myId,code:Net.code}};
   let p=P(id);
-  if(p){p.on=true;p.seen=Date.now();p.name=name;p.op=!!d.op;sendTo(id,welcome,true);pushRoom();fullSync(id);return}
+  if(p){p.on=true;p.seen=Date.now();p.name=name;p.op=!!d.op;p.vd=cleanVd(d.vd);sendTo(id,welcome,true);pushRoom();fullSync(id);return}
   if(H.priv&&String(d.k||'')!==Net.key)return sendTo(id,{t:'deny',d:{reason:'الرقم السري غلط 🔒',pin:true}},true);
   if(active().length>=MAX_PEOPLE)return sendTo(id,{t:'deny',d:{reason:'الغرفة ممتلئة ('+MAX_PEOPLE+' أشخاص)'}},true);
-  H.players.push({id,name,on:true,seen:Date.now(),mic:false,direct:false,op:!!d.op});
+  H.players.push({id,name,on:true,seen:Date.now(),mic:false,direct:false,op:!!d.op,vd:cleanVd(d.vd)});
   sendTo(id,welcome,true);pushRoom();
   if(H.sharer&&H.lastFrame)sendFrameTo(id,H.lastFrame);
+  if(H.sharer)requestKey(H.sharer);
   othersMsg(id,{t:'fx',d:{k:'toast',m:'👋 '+name+' دخل'}});
 }
 function onBye(id){
@@ -476,7 +493,7 @@ function hostShare(id,on,kind){
     const cur=H.sharer&&P(H.sharer);
     if(cur&&H.sharer!==id){sendTo(id,{t:'fx',d:{k:'ssdeny',m:cur.name+' يعرض الحين، انتظره يخلص'}});return}
     const k=['screen','cam','img','vid'].includes(kind)?kind:'screen';
-    if(H.sharer!==id){H.sharer=id;H.lastFrame=null;H.fin={};H.lastFid=0;H.skipRun=0;H.sk=k;pushRoom()}
+    if(H.sharer!==id){H.sharer=id;H.lastFrame=null;H.fin={};H.lastFid=0;H.skipRun=0;H.mqNk=true;H.sk=k;Object.values(Net.peers).forEach(pr=>pr.nk=true);pushRoom()}
     else if(H.sk!==k){H.sk=k;pushRoom()}
   }else if(H.sharer===id){H.sharer=null;H.lastFrame=null;H.fin={};pushRoom()}
 }
@@ -484,24 +501,30 @@ function hostFrame(from,d){
   if(from!==H.sharer||typeof d.a!=='string'||d.a.length>20000||typeof d.fid!=='number'||!(d.n>0&&d.n<=150)||!(d.i>=0&&d.i<d.n))return;
   if(d.fid<=H.lastFid)return;
   let f=H.fin;
-  if(f.fid!==d.fid){if(f.fid&&d.fid<f.fid)return;H.fin=f={fid:d.fid,n:d.n,parts:new Array(d.n),got:0,m:'j',q:0}}
-  if(d.i===0){f.m=d.m==='w'?'w':'j';f.q=Number(d.q)||0}
+  if(f.fid!==d.fid){if(f.fid&&d.fid<f.fid)return;H.fin=f={fid:d.fid,n:d.n,parts:new Array(d.n),got:0,M:{m:'j',q:0}}}
+  if(d.i===0)f.M=cleanMeta(d);
   if(f.parts[d.i]==null){f.parts[d.i]=d.a;f.got++}
-  if(f.got===f.n){H.fin={};hostFrameFull(from,f.fid,f.parts,f.m,f.q)}
+  if(f.got===f.n){H.fin={};hostFrameFull(from,f.fid,f.parts,f.M)}
 }
-function frameMsg(f,fid,i,n,a,m,q){const d={f,fid,i,n,a};if(i===0){d.m=m;d.q=q}return JSON.stringify({t:'sf',d})}
-function hostFrameFull(from,fid,parts,m,q){
+/* معلومات الإطار: m نوعه (w صورة WebP، j صورة JPEG، v فيديو)، q مستوى الجودة، وللفيديو: k إطار أساسي، c الصيغة، w و h المقاس */
+function cleanMeta(d){const m=d.m==='w'||d.m==='v'?d.m:'j',M={m,q:Number(d.q)||0};if(m==='v'){M.k=d.k?1:0;M.c=VCODECS.includes(d.c)?d.c:'vp8';M.w=d.w|0;M.h=d.h|0}return M}
+function frameMsg(f,fid,i,n,a,M){const d={f,fid,i,n,a};if(i===0)Object.assign(d,M);return JSON.stringify({t:'sf',d})}
+/* الفيديو يحتاج إطار أساسي (key) قبل الباقي: لو أحد دخل أو فاته شي نطلب واحد من اللي يعرض */
+function requestKey(from){const now=Date.now();if(now-(H.kreqT||0)<1200)return;H.kreqT=now;if(from===Net.myId)S.needKey=true;else sendTo(from,{t:'fx',d:{k:'kf'}})}
+function hostFrameFull(from,fid,parts,M){
   if(from!==H.sharer)return;
-  H.lastFid=fid;H.lastFrame={f:from,fid,parts,m,q};
-  if(from!==Net.myId)showFrame(from,fid,parts.join(''),m,q);
-  const n=parts.length,now=Date.now();let viaMq=false,viewers=0,skipped=0;
+  const vid=M.m==='v';
+  H.lastFid=fid;if(!vid)H.lastFrame={f:from,fid,parts,M};else H.lastFrame=null;
+  if(from!==Net.myId)gotFrame(from,fid,parts.join(''),M);
+  const n=parts.length,now=Date.now();let viaMq=false,viewers=0,skipped=0,needKey=false;
   H.players.forEach(p=>{
     if(!p.on||p.id===from||p.id===Net.myId)return;
     const pr=Net.peers[p.id];
     if(pr&&pr.f&&pr.f.readyState==='open'){
       viewers++;
-      if(pr.f.bufferedAmount<700000){try{parts.forEach((a,i)=>pr.f.send(frameMsg(from,fid,i,n,a,m,q)))}catch(e){}}
-      else skipped++; // نته ضعيف: نتخطى هالصورة له
+      if(vid&&pr.nk!==false&&!M.k){needKey=true;return} // ينتظر إطار أساسي
+      if(pr.f.bufferedAmount<(vid?400000:700000)){try{parts.forEach((a,i)=>pr.f.send(frameMsg(from,fid,i,n,a,M)))}catch(e){}if(vid&&M.k)pr.nk=false}
+      else{skipped++;if(vid){pr.nk=true;needKey=true}} // نته ضعيف: نتخطى هالإطار له
       return;
     }
     viaMq=true;
@@ -509,14 +532,20 @@ function hostFrameFull(from,fid,parts,m,q){
   if(viaMq&&Net.mq){
     viewers++;
     const wsb=Net.mq.ws?Net.mq.ws.bufferedAmount:0;
-    if(wsb>500000)skipped++;
-    else if(now-H.lastMqFrame>=1000){H.lastMqFrame=now;parts.forEach((a,i)=>Net.mq.publish(tp('/f'),frameMsg(from,fid,i,n,a,m,q)))}
+    if(vid){
+      if(H.mqNk!==false&&!M.k)needKey=true;
+      else if(wsb>300000){skipped++;H.mqNk=true;needKey=true}
+      else{parts.forEach((a,i)=>Net.mq.publish(tp('/f'),frameMsg(from,fid,i,n,a,M)));if(M.k)H.mqNk=false}
+    }
+    else if(wsb>500000)skipped++;
+    else if(now-H.lastMqFrame>=1000){H.lastMqFrame=now;parts.forEach((a,i)=>Net.mq.publish(tp('/f'),frameMsg(from,fid,i,n,a,M)))}
   }
+  if(needKey)requestKey(from);
   // لو أغلب المشاهدين ما لحقوا: نطلب من اللي يعرض ينزّل الجودة
   if(viewers&&skipped*2>=viewers)H.skipRun++;else H.skipRun=0;
   if(H.skipRun>=2){H.skipRun=0;if(from===Net.myId)lvDown();else sendTo(from,{t:'fx',d:{k:'sq'}})}
 }
-function sendFrameTo(id,fr){const n=fr.parts.length;fr.parts.forEach((a,i)=>{const d={f:fr.f,fid:fr.fid,i,n,a};if(i===0){d.m=fr.m;d.q=fr.q}sendTo(id,{t:'sf',d})})}
+function sendFrameTo(id,fr){const n=fr.parts.length;fr.parts.forEach((a,i)=>{const d={f:fr.f,fid:fr.fid,i,n,a};if(i===0)Object.assign(d,fr.M);sendTo(id,{t:'sf',d})})}
 
 /* ================= 6) العميل ================= */
 function parseJoin(s){
@@ -528,7 +557,7 @@ const C = {screen:'home',joined:false,me:null,room:null,direct:false,rtt:null,la
 let GUEST=null;
 const myName = ()=>{const v=(LS.get('mj_name','')||'').trim();if(v)return cleanName(v);if(!GUEST)GUEST='ضيف '+(10+rand(89));return GUEST};
 const pname = id=>{const p=C.room&&C.room.players.find(x=>x.id===id);return p?p.name:'مشارك'};
-const helloMsg = ()=>({t:'hello',d:{name:myName(),k:Net.key||undefined,op:CAP.o}});
+const helloMsg = ()=>({t:'hello',d:{name:myName(),k:Net.key||undefined,op:CAP.o,vd:CAP.vd}});
 
 function clientHandle(m){
   if(!m||!m.t)return;
@@ -558,6 +587,7 @@ function clientHandle(m){
       if(d.k==='toast')toast(d.m);
       if(d.k==='ssdeny'){shareStop(false);render();toast(d.m)}
       if(d.k==='sq')lvDown();
+      if(d.k==='kf')S.needKey=true;
       return;
     case 'po':if(d.ts!=null)C.rtt=Math.round(performance.now()-d.ts);updateChips();return;
     case 'rtc':clientRtc(d);return;
@@ -650,7 +680,7 @@ function tick(){
   }
   if(Net.mq&&Net.mq.connected&&now-TK.mq>=20000){TK.mq=now;Net.mq._send(new Uint8Array([0xC0,0]))}
 }
-(function(){try{const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),250)'],{type:'text/javascript'})));w.onmessage=tick}catch(e){setInterval(tick,250)}})();
+(function(){try{const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),40)'],{type:'text/javascript'})));w.onmessage=tick}catch(e){setInterval(tick,40)}})();
 
 /* ================= 7) المايك ==================
    منقول من اللعبة (فلاتر، مكبر الجوال، إصلاحات الآيفون)، وزاد عليه Opus:
@@ -658,16 +688,20 @@ function tick(){
    (أوضح وأخف 5 مرات تقريبًا)، وإلا يرجع لـ μ-law 16kHz مثل اللعبة. المضيف يقرر (codec في رسالة room). */
 const VR = 16000;   // جودة μ-law
 const OSR = 24000;  // جودة Opus
-const CAP = {o:false};
+const CAP = {o:false,ve:[],vd:[]};
 const CAPP = (async()=>{try{
   if(window.AudioEncoder&&window.AudioDecoder&&window.EncodedAudioChunk&&window.AudioData){
     const c={codec:'opus',sampleRate:OSR,numberOfChannels:1};
     const e=await AudioEncoder.isConfigSupported(Object.assign({bitrate:16000},c)),d=await AudioDecoder.isConfigSupported(c);
     CAP.o=!!(e&&e.supported&&d&&d.supported);
-  }}catch(e){CAP.o=false}})();
+  }}catch(e){CAP.o=false}
+  try{if(window.VideoEncoder&&window.VideoDecoder&&window.VideoFrame&&window.EncodedVideoChunk){for(const c of VCODECS){
+    try{const e=await VideoEncoder.isConfigSupported({codec:c,width:1280,height:720,bitrate:1000000,framerate:15});if(e&&e.supported)CAP.ve.push(c)}catch(e){}
+    try{const d=await VideoDecoder.isConfigSupported({codec:c});if(d&&d.supported)CAP.vd.push(c)}catch(e){}}}}catch(e){}
+})();
 /* عزل الصوت (زر في الشريط تحت، طافي بالبداية): يشغّل كاتم الضوضاء في المتصفح (وعزل الصوت لو مدعوم)،
    ويضيّق الفلاتر، ويرفع حد السكوت عشان أصوات الخلفية ما تنرسل */
-const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.012]};
+const ISO = {hp:[110,170],lp:[7200,6000],gate:[0.008,0.012],near:0.32};
 /* كاتم ضوضاء خاص بالموقع (يشتغل مع عزل الصوت): يتعلّم صوت الخلفية الثابت (مكيف، مروحة، زحمة)
    ويطرحه من الصوت بتحليل الترددات (FFT 512 بتداخل نص). يشتغل على أي جهاز حتى لو المتصفح ما يدعم العزل. */
 const DN = {rate:0,N:512,H:256,win:null,inb:new Float32Array(0),ola:null,noise:null,ps:null,g:null,re:null,im:null,cos:null,sin:null,rev:null};
@@ -700,7 +734,7 @@ function denoise(x,rate){
       const p=re[k]*re[k]+im[k]*im[k]+1e-12;
       ps[k]=ps[k]*.7+p*.3;                                // طاقة كل تردد (منعّمة)
       nz[k]=ps[k]<nz[k]?nz[k]*.9+ps[k]*.1:nz[k]*1.002+1e-12; // نتابع أقل مستوى = صوت الخلفية
-      let G=1-7.5*nz[k]/ps[k];if(G<.02)G=.02;            // نطرح الخلفية بقوة (حوالي 15 ديسيبل) والكلام يبقى زي ما هو
+      let G=1-10*nz[k]/ps[k];if(G<.003)G=.003;           // نطرح الخلفية بقوة (لين 50 ديسيبل) والكلام يبقى زي ما هو
       g[k]=G>g[k]?G*.7+g[k]*.3:G*.4+g[k]*.6;
       re[k]*=g[k];im[k]*=g[k];if(k>0&&k<N/2){re[N-k]*=g[k];im[N-k]*=g[k]}
     }
@@ -802,7 +836,7 @@ function micConstraints(){
 }
 const micLp = ()=>V.iso?ISO.lp[1]:(useOpus()?11000:ISO.lp[0]);
 async function isoToggle(){
-  V.iso=!V.iso;LS.set('mj_iso',V.iso);DN.rate=0;
+  V.iso=!V.iso;LS.set('mj_iso',V.iso);DN.rate=0;V.pk=0;
   const tr=V.stream&&V.stream.getAudioTracks()[0];
   if(tr){
     try{await tr.applyConstraints(micConstraints())}catch(e){}
@@ -823,7 +857,7 @@ async function isoToggle(){
     }
   }
   if(V.flt){V.flt[0].frequency.value=V.iso?ISO.hp[1]:ISO.hp[0];V.flt[1].frequency.value=micLp()}
-  render();toast(V.iso?'🎧 عزل الصوت شغال — أصوات الخلفية تنقص':'عزل الصوت طافي');
+  render();toast(V.iso?'🎧 العزل القوي شغال — يشيل الضوضاء والأصوات البعيدة. ما يزيد النت (بالعكس يقلله)، بس يستهلك بطارية أكثر شوي 🔋':'عزل الصوت طافي');
 }
 function voiceStop(){micOff();V.next={};V.seqs={};V.dl={};Object.values(V.dec).forEach(d=>{try{d.close()}catch(e){}});V.dec={};V.dts={}}
 /* مشفّر Opus */
@@ -848,7 +882,14 @@ function micChunk(e){
   const out=V.iso?Array.from(denoise(Float32Array.from(raw),rate)):raw; // عزل الصوت: نشيل الضوضاء الثابتة (مكيف، مروحة، زحمة)
   if(!out.length)return;
   for(let i=0;i<out.length;i++)sq+=out[i]*out[i];
-  if(Math.sqrt(sq/out.length)>(V.iso?ISO.gate[1]:ISO.gate[0])){V.hang=10;C.talk[C.me]=performance.now()}else if(V.hang>0)V.hang--;else return; // ما نرسل وقت السكوت
+  const rms=Math.sqrt(sq/out.length);let thr=V.iso?ISO.gate[1]:ISO.gate[0];
+  if(V.iso){ // بوابة قريبة: نتعلّم قوة صوتك أنت (قريب من المايك)، وأي صوت أضعف منه بـ 10 ديسيبل (ناس جنبك أو بعيد) ما ينرسل
+    if(rms>thr)V.pk=Math.max(rms,(V.pk||0)*0.998);else V.pk=(V.pk||0)*0.9995;
+    thr=Math.max(thr,(V.pk||0)*ISO.near);
+  }
+  if(rms>thr){V.hang=V.iso?6:10;C.talk[C.me]=performance.now()}
+  else if(V.hang>0){V.hang--;if(V.iso){const g=Math.min(1,(rms/thr)*(rms/thr));for(let i=0;i<out.length;i++)out[i]*=g}}
+  else return; // ما نرسل وقت السكوت
   if(V.hang===0){const L=Math.min(out.length,96);for(let i=0;i<L;i++)out[out.length-1-i]*=i/L} // تخفيت آخر مقطع عشان ما تطلع طقّة
   if(opus){
     const enc=opusEnc();
@@ -990,10 +1031,11 @@ async function shareStart(kind,arg){
     v.style.cssText='position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;left:0;top:0'; // الآيفون يحتاجه داخل الصفحة عشان يشتغل
     document.body.appendChild(v);v.srcObject=st;v.play().catch(()=>{});
     if(S.track)S.track.onended=()=>{if(S.on&&S.stream===st){shareStop(true);render();toast('⏹️ انتهى العرض')}};
+    frameReader(S.track);
   }
   S.cv=S.cv||document.createElement('canvas');S.cx=S.cx||S.cv.getContext('2d');
   if(!S.sc){S.sc=document.createElement('canvas');S.sc.width=64;S.sc.height=36;S.sx=S.sc.getContext('2d',{willReadFrequently:true})}
-  S.sig=null;S.last=0;S.fid=Math.max(S.fid,Date.now());S.lv=(Net.isHost||C.direct)?1:2;S.lvT=Date.now();S.on=true;
+  S.sig=null;S.last=0;S.fid=Math.max(S.fid,Date.now());S.lv=(Net.isHost||C.direct)?1:3;S.lvT=Date.now();S.needKey=true;S.lastKey=0;S.vbad=0;S.on=true;
   sendHost({t:'ss',d:{on:true,k:kind}});
   render();if(!was)toast(kind==='screen'?'🖥️ بدأت تعرض شاشتك':kind==='cam'?'📷 بدأت تعرض الكاميرا':kind==='vid'?'🎬 بدأت تعرض التسجيل':'🖼️ بدأت تعرض الصورة');
 }
@@ -1004,6 +1046,8 @@ function shareStop(notify){
   if(S.vurl){const u=S.vurl;S.vurl=null;setTimeout(()=>URL.revokeObjectURL(u),500)}
   if(S.img&&S.img.close){try{S.img.close()}catch(e){}}
   S.stream=S.track=S.ic=S.video=S.img=null;S.busy=false;
+  if(S.enc){try{S.enc.close()}catch(e){}S.enc=null}S.vc=null;
+  if(S.reader){try{S.reader.cancel()}catch(e){}S.reader=null}if(S.latest){try{S.latest.close()}catch(e){}S.latest=null}
   if(was&&notify&&C.joined)sendHost({t:'ss',d:{on:false}});
 }
 async function shareTick(){
@@ -1013,8 +1057,11 @@ async function shareTick(){
   // النت زحمة؟ ننزّل الجودة. صافي؟ نرفعها شوي شوي
   let buf=0;
   if(!Net.isHost){const hp=Net.hp;if(direct&&hp&&hp.f&&hp.f.readyState==='open')buf=hp.f.bufferedAmount;else if(Net.mq&&Net.mq.ws)buf=Net.mq.ws.bufferedAmount}
-  if(buf>250000){lvDown();return}
+  if(buf>(S.vc?150000:250000)){lvDown();return}
   if(buf===0)lvUp();
+  const vc=pickVc();
+  if(S.enc&&S.vc!==vc){try{S.enc.close()}catch(e){}S.enc=null;S.vc=null}
+  if(vc)return videoTick(vc,now);
   const L=LV[S.lv];
   if(now-S.last<L.g)return;
   S.busy=true;
@@ -1035,13 +1082,58 @@ async function shareTick(){
     if(!changed&&now-S.last<(S.img?10000:8000))return; // ما تغيّر شي: ما نرسل
     S.sig=px.slice();S.last=now;
     const m=S.webp?'w':'j',url=S.cv.toDataURL(S.webp?'image/webp':'image/jpeg',L.q),a=url.slice(url.indexOf(',')+1);
-    const fid=++S.fid,CH=15000,n=Math.ceil(a.length/CH),parts=[];
-    for(let i=0;i<n;i++)parts.push(a.slice(i*CH,(i+1)*CH));
-    showFrame(C.me,fid,a,m,S.lv); // معاينة عندك
-    if(Net.isHost){hostFrameFull(Net.myId,fid,parts,m,S.lv);return}
-    const hp=Net.hp,useF=hp&&hp.f&&hp.f.readyState==='open';
-    parts.forEach((x,i)=>{const d={fid,i,n,a:x};if(i===0){d.m=m;d.q=S.lv}const s=JSON.stringify({t:'sf',d,f:Net.myId});if(useF){try{hp.f.send(s);return}catch(e){}}if(Net.mq)Net.mq.publish(tp('/h'),s)});
+    showFrame(C.me,S.fid+1,a,m,S.lv); // معاينة عندك
+    sendShared(a,{m,q:S.lv});
   }catch(e){}finally{S.busy=false}
+}
+/* نرسل إطار (صورة أو فيديو) مقطّع للمضيف */
+function sendShared(a,M){
+  const fid=++S.fid,CH=15000,n=Math.max(1,Math.ceil(a.length/CH)),parts=[];
+  for(let i=0;i<n;i++)parts.push(a.slice(i*CH,(i+1)*CH));
+  if(Net.isHost){hostFrameFull(Net.myId,fid,parts,M);return}
+  const hp=Net.hp,useF=hp&&hp.f&&hp.f.readyState==='open';
+  parts.forEach((x,i)=>{const d={fid,i,n,a:x};if(i===0)Object.assign(d,M);const s=JSON.stringify({t:'sf',d,f:Net.myId});if(useF){try{hp.f.send(s);return}catch(e){}}if(Net.mq)Net.mq.publish(tp('/h'),s)});
+}
+/* نختار صيغة فيديو يقدر جهازك يسويها وكل اللي بالغرفة يقدرون يشغلونها، وإلا نرجع للصور */
+const pickVc = ()=>(S.kind!=='img'&&C.room&&(S.vbad||0)<3)?(CAP.ve.find(c=>(C.room.vd||[]).includes(c))||null):null;
+function grabSrc(){
+  if(S.latest)return{src:S.latest,w:S.latest.displayWidth,h:S.latest.displayHeight}; // كروم: آخر إطار مباشرة من المصدر (يشتغل حتى لو الصفحة بالخلفية)
+  if(S.video&&S.video.videoWidth&&S.video.readyState>=2)return{src:S.video,w:S.video.videoWidth,h:S.video.videoHeight};
+  return null;
+}
+async function frameReader(track){
+  if(!window.MediaStreamTrackProcessor||!track)return;
+  let rd;try{rd=new MediaStreamTrackProcessor({track}).readable.getReader()}catch(e){return}
+  S.reader=rd;
+  try{for(;;){const {value,done}=await rd.read();if(done)break;if(S.reader!==rd){value&&value.close();break}if(S.latest)S.latest.close();S.latest=value}}catch(e){}
+}
+function videoTick(vc,now){
+  const L=VLV[S.lv];
+  if(now-S.last<1000/L.fps-5)return;
+  const g=grabSrc();if(!g)return;
+  const k=Math.min(1,L.w/g.w,L.h/g.h),w=Math.max(16,Math.round(g.w*k/2)*2),h=Math.max(16,Math.round(g.h*k/2)*2);
+  try{
+    if(!S.enc||S.enc.state==='closed'){
+      S.enc=new VideoEncoder({output:ch=>videoOut(ch),error:()=>{S.vbad=(S.vbad||0)+1;S.enc=null;S.vc=null}});S.ew=0;
+    }
+    if(S.vc!==vc||S.ew!==w||S.eh!==h||S.ebr!==L.br||S.efps!==L.fps){
+      const cfg={codec:vc,width:w,height:h,bitrate:L.br,framerate:L.fps,latencyMode:'realtime'};
+      if(vc.startsWith('avc'))cfg.avc={format:'annexb'};
+      S.enc.configure(cfg);S.vc=vc;S.ew=w;S.eh=h;S.ebr=L.br;S.efps=L.fps;S.needKey=true;
+    }
+    if(S.enc.encodeQueueSize>2)return; // الجهاز ما لحق: نتخطى إطار
+    if(S.cv.width!==w||S.cv.height!==h){S.cv.width=w;S.cv.height=h}
+    S.cx.drawImage(g.src,0,0,w,h);
+    const pv=$('#scv');if(pv&&S.on){if(pv.width!==w||pv.height!==h){pv.width=w;pv.height=h}pv.getContext('2d').drawImage(S.cv,0,0);if(!C.vidOn){C.vidOn=true;updateStage()}} // معاينة عندك
+    const vf=new VideoFrame(S.cv,{timestamp:Math.round(performance.now()*1000)});
+    const key=!!S.needKey||now-(S.lastKey||0)>5000;if(key){S.needKey=false;S.lastKey=now}
+    S.enc.encode(vf,{keyFrame:key});vf.close();S.last=now;
+  }catch(e){S.vbad=(S.vbad||0)+1;try{S.enc&&S.enc.close()}catch(_){}S.enc=null;S.vc=null}
+}
+function videoOut(ch){
+  if(!S.on)return;
+  const u=new Uint8Array(ch.byteLength);ch.copyTo(u);
+  sendShared(u8b64(u),{m:'v',q:S.lv,k:ch.type==='key'?1:0,c:S.vc,w:S.ew,h:S.eh});
 }
 /* استقبال الصور */
 const F = {f:null,last:0,cur:null,q:0};
@@ -1050,10 +1142,37 @@ function onFrameChunk(d){
   if(!d||!sh||d.f!==sh||sh===C.me||typeof d.a!=='string'||typeof d.fid!=='number'||!(d.n>0))return;
   if(F.f!==sh){F.f=sh;F.last=0;F.cur=null}
   if(d.fid<=F.last)return;
-  if(!F.cur||F.cur.fid!==d.fid){if(F.cur&&d.fid<F.cur.fid)return;F.cur={fid:d.fid,n:d.n,parts:new Array(d.n),got:0,m:'j',q:0}}
-  const c=F.cur;if(d.i===0){c.m=d.m;c.q=d.q}
+  if(!F.cur||F.cur.fid!==d.fid){if(F.cur&&d.fid<F.cur.fid)return;F.cur={fid:d.fid,n:d.n,parts:new Array(d.n),got:0,M:{m:'j',q:0}}}
+  const c=F.cur;if(d.i===0)c.M=cleanMeta(d);
   if(d.i>=0&&d.i<c.n&&c.parts[d.i]==null){c.parts[d.i]=d.a;c.got++}
-  if(c.got===c.n){F.cur=null;showFrame(sh,c.fid,c.parts.join(''),c.m,c.q)}
+  if(c.got===c.n){F.cur=null;gotFrame(sh,c.fid,c.parts.join(''),c.M)}
+}
+function gotFrame(from,fid,b64,M){if(M.m==='v')vidFrame(from,fid,b64,M);else showFrame(from,fid,b64,M.m,M.q)}
+/* فك الفيديو وعرضه */
+const VD={dec:null,c:null,f:null,wait:true,kqT:0};
+function askKey(){const now=Date.now();if(now-VD.kqT<1500)return;VD.kqT=now;if(Net.isHost){if(H.sharer)requestKey(H.sharer)}else sendHost({t:'kq'})}
+function resetDec(){
+  if(VD.dec){try{VD.dec.close()}catch(e){}}VD.dec=null;VD.wait=true;
+  if(!window.VideoDecoder)return;
+  try{VD.dec=new VideoDecoder({output:fr=>drawVid(fr),error:()=>{VD.wait=true;try{VD.dec&&VD.dec.close()}catch(e){}VD.dec=null;askKey()}})}catch(e){VD.dec=null}
+}
+function vidFrame(from,fid,b64,M){
+  if(!C.room||C.room.sharer!==from)return;
+  if(F.f!==from){F.f=from;F.last=0;F.cur=null}
+  if(fid<F.last)return;F.last=fid;
+  if(VD.f!==from||VD.c!==M.c||!VD.dec||VD.dec.state==='closed'){resetDec();VD.f=from;VD.c=M.c}
+  if(!VD.dec)return;
+  if(VD.wait&&!M.k){askKey();return}
+  try{
+    if(M.k&&VD.dec.state!=='configured')VD.dec.configure({codec:M.c,optimizeForLatency:true});
+    if(M.k)VD.wait=false;
+    VD.dec.decode(new EncodedVideoChunk({type:M.k?'key':'delta',timestamp:fid*1000,data:b64u8(b64)}));
+  }catch(e){resetDec();VD.f=from;VD.c=M.c;askKey();return}
+  const qq=Math.max(0,Math.min(LV.length-1,Number(M.q)||0));if(F.q!==qq){F.q=qq;updateStage()}
+}
+function drawVid(fr){
+  try{const cv=$('#scv');if(cv&&C.room&&C.room.sharer===VD.f){const w=fr.displayWidth,h=fr.displayHeight;if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h}cv.getContext('2d').drawImage(fr,0,0,w,h);C.frames=(C.frames||0)+1;if(!C.vidOn){C.vidOn=true;updateStage()}}}catch(e){}
+  fr.close();
 }
 function showFrame(from,fid,b64,m,q){
   if(!C.room||C.room.sharer!==from)return;
@@ -1061,13 +1180,13 @@ function showFrame(from,fid,b64,m,q){
   if(fid<F.last)return;F.last=fid;
   let url;
   try{url=URL.createObjectURL(new Blob([b64u8(b64)],{type:m==='w'?'image/webp':'image/jpeg'}))}catch(e){return}
-  const old=C.frameUrl;C.frameUrl=url;C.frames=(C.frames||0)+1;
+  const old=C.frameUrl;C.frameUrl=url;C.frames=(C.frames||0)+1;if(C.vidOn){C.vidOn=false;updateStage()}
   const qq=Math.max(0,Math.min(LV.length-1,Number(q)||0));if(F.q!==qq){F.q=qq;const l=$('#slbl');if(l)updateStage()}
   const img=$('#scr');if(img){img.src=url;img.classList.add('show')}
   const ph=$('#scrph');if(ph)ph.style.display='none';
   if(old)setTimeout(()=>URL.revokeObjectURL(old),1500);
 }
-function clearFrame(){if(C.frameUrl){const o=C.frameUrl;setTimeout(()=>URL.revokeObjectURL(o),1500)}C.frameUrl=null;F.f=null;F.last=0;F.cur=null;F.q=0}
+function clearFrame(){if(C.frameUrl){const o=C.frameUrl;setTimeout(()=>URL.revokeObjectURL(o),1500)}C.frameUrl=null;F.f=null;F.last=0;F.cur=null;F.q=0;C.vidOn=false;if(VD.dec){try{VD.dec.close()}catch(e){}}VD.dec=null;VD.f=null;VD.wait=true}
 const isFs = ()=>!!(document.fullscreenElement||document.webkitFullscreenElement);
 function toggleFs(){
   const st=$('#stagebox');
@@ -1117,6 +1236,7 @@ function vHome(){
      '<label class="lb" for="lk">🔗 الصق الرابط اللي أرسله لك المضيف</label><div class="row"><input class="inp ltr" id="lk" placeholder="https://…" autocomplete="off"><button class="btn sec small auto" data-a="joinlk">دخول</button></div>'+
      '<div class="or">أو</div>'+
      '<label class="lb" for="cd">🔢 اكتب كود الغرفة بس</label><div class="row"><input class="inp num" id="cd" inputmode="numeric" maxlength="5" placeholder="12345" autocomplete="off"><button class="btn sec small auto" data-a="joincd">دخول</button></div></div>';
+  h+='<div class="hint" style="opacity:.6">النسخة 5 · فيديو سلس + عزل صوت قوي</div>';
   return h+'</div>';
 }
 /* ---------- الغرف العامة المفتوحة ---------- */
@@ -1176,7 +1296,7 @@ function vRoom(){
       '<div class="mi'+(mic?' on':'')+'">'+(mic?'🎙️':'🔇')+'</div>'+(p.host?'':'<div class="cn" title="'+(p.direct?'اتصال مباشر':'عبر الخادم')+'">'+(p.direct?'⚡':'☁️')+'</div>')+'</div>'}).join('')+'</div>';
   h+='<div class="bar">'+
     '<button class="cb '+(V.on?'on':'off')+'" data-a="mic"><span class="i">'+(V.on?'🎙️':'🔇')+'</span>'+(V.on?'المايك شغال':'المايك مقفل')+'</button>'+
-    '<button class="cb'+(V.iso?' on':'')+'" data-a="iso"><span class="i">🎧</span>'+(V.iso?'العزل شغال':'عزل الصوت')+'</button>'+
+    '<button class="cb'+(V.iso?' on':'')+'" data-a="iso"><span class="i">🎧</span>'+(V.iso?'العزل شغال 🔋':'عزل الصوت')+'</button>'+
     '<button class="cb'+(S.on?' on':'')+'" data-a="share"><span class="i">'+(S.on?'⏹️':'🖥️')+'</span>'+(S.on?'إيقاف العرض':'اعرض')+'</button>'+
     '<button class="cb" data-a="invite"><span class="i">🔗</span>دعوة</button>'+
     '<button class="cb leave" data-a="leave"><span class="i">📞</span>خروج</button></div>';
@@ -1186,17 +1306,19 @@ function vRoom(){
 function updateStage(){
   const box=$('#stagebox'),sh=C.joined&&C.room&&C.room.sharer;
   if(!sh){if(box.dataset.sh){box.innerHTML='';box.dataset.sh='';box.className='';if(isFs())(document.exitFullscreen||document.webkitExitFullscreen).call(document)}return}
-  if(box.dataset.sh!==sh){box.dataset.sh=sh;box.className='stage';box.innerHTML='<img id="scr" alt=""><div class="ph" id="scrph"><div class="spin"></div><span></span></div><div class="lbl" id="slbl"></div><div class="sbtns" id="sbtns"></div>'}
+  if(box.dataset.sh!==sh){box.dataset.sh=sh;box.className='stage';box.innerHTML='<img id="scr" alt=""><canvas id="scv"></canvas><div class="ph" id="scrph"><div class="spin"></div><span></span></div><div class="lbl" id="slbl"></div><div class="sbtns" id="sbtns"></div>'}
   const me=sh===C.me,nm=pname(sh),k=C.room.sk||'screen',what=k==='cam'?'الكاميرا':k==='img'?'صورة':k==='vid'?'تسجيل شاشة':'شاشته';
   const q=me?S.lv:F.q;
-  $('#slbl').textContent=(k==='cam'?'📷 ':k==='img'?'🖼️ ':k==='vid'?'🎬 ':'🖥️ ')+(me?'أنت تعرض '+(k==='screen'?'شاشتك':what):nm+' يعرض '+what)+(C.frameUrl&&k!=='img'?' · الجودة: '+LV_NAMES[q]:'');
+  $('#slbl').textContent=(k==='cam'?'📷 ':k==='img'?'🖼️ ':k==='vid'?'🎬 ':'🖥️ ')+(me?'أنت تعرض '+(k==='screen'?'شاشتك':what):nm+' يعرض '+what)+((C.frameUrl||C.vidOn)&&k!=='img'?' · الجودة: '+LV_NAMES[q]:'');
   let b='';
   if(me){b+='<button class="sbtn stop" data-a="share">⏹️ إيقاف</button>';if(k==='cam')b+='<button class="sbtn" data-a="flip">🔄 قلب الكاميرا</button>';if(k==='img')b+='<button class="sbtn" data-a="src" data-v="img">🖼️ صورة ثانية</button>';
     if(k==='vid'&&S.video){b+='<button class="sbtn" data-a="vidpp">'+(S.video.paused?'▶️ تشغيل':'⏸️ إيقاف مؤقت')+'</button><button class="sbtn" data-a="vidre">🔁 من البداية</button>'}}
   else b+='<button class="sbtn" data-a="fs">'+((isFs()||C.max)?'✕ تصغير':'⛶ ملء الشاشة')+'</button>';
   const sb=$('#sbtns');if(sb.innerHTML!==b)sb.innerHTML=b;
-  const ph=$('#scrph');if(ph){ph.style.display=C.frameUrl?'none':'';ph.querySelector('span').textContent=me?'جاري التجهيز…':'جاري التحميل من '+nm+'…'}
-  const img=$('#scr');if(C.frameUrl&&img.getAttribute('src')!==C.frameUrl){img.src=C.frameUrl}img.classList.toggle('show',!!C.frameUrl);
+  const pic=!!(C.frameUrl||C.vidOn);
+  const ph=$('#scrph');if(ph){ph.style.display=pic?'none':'';ph.querySelector('span').textContent=me?'جاري التجهيز…':'جاري التحميل من '+nm+'…'}
+  const img=$('#scr');if(C.frameUrl&&img.getAttribute('src')!==C.frameUrl){img.src=C.frameUrl}img.classList.toggle('show',!!C.frameUrl&&!C.vidOn);
+  $('#scv').classList.toggle('show',!!C.vidOn);
   box.classList.toggle('max',!!C.max);
 }
 /* مين يتكلم الحين */
